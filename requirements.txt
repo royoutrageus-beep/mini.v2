@@ -4,4 +4,4 @@ pandas-ta
 streamlit
 requests
 pytz
-numpy
+numpy<2.0.0
