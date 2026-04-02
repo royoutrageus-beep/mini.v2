@@ -3,5 +3,4 @@ pandas
 streamlit
 requests
 pytz
-numpy<2.0.0
-https://github.com/twopirllc/pandas-ta/archive/master.zip
+numpy
