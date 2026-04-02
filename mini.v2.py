@@ -1,6 +1,5 @@
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import streamlit as st
 import time
 import requests
@@ -9,14 +8,40 @@ import numpy as np
 from datetime import datetime
 
 # --- CONFIG ---
-# Tetap sedia bot tapi kita kasih saklar On/Off biar gak ribut
 TOKEN = st.secrets["TELEGRAM_TOKEN"]
 CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
 jakarta_tz = pytz.timezone('Asia/Jakarta')
 
 st.set_page_config(layout="wide", page_title="Theta Turbo V4.0", page_icon="⚡")
 
-# --- CSS CUSTOM (Biar Eye-Pleasing) ---
+# --- FUNGSI INDIKATOR MANUAL (PENGGANTI PANDAS_TA) ---
+def calculate_indicators(df):
+    # 1. EMA 20, 50, 100
+    df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+    df['EMA100'] = df['Close'].ewm(span=100, adjust=False).mean()
+    
+    # 2. RSI (14)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    df['RSI_EMA'] = df['RSI'].ewm(span=14, adjust=False).mean()
+    
+    # 3. MACD (12, 26, 9)
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACDH'] = df['MACD'] - df['MACD_Signal']
+    
+    # 4. Volume Average
+    df['Vol_Avg'] = df['Volume'].rolling(window=20).mean()
+    
+    return df
+
+# --- CSS CUSTOM ---
 st.markdown("""
     <style>
     .reportview-container { background: #0e1117; }
@@ -36,8 +61,7 @@ tele_notif = st.sidebar.checkbox("🚀 Kirim Notif Telegram", value=False)
 min_score_filter = st.sidebar.slider("Minimal Score Tampil", 2, 4, 3)
 vol_threshold = st.sidebar.slider("Vol Spike Threshold (x)", 1.0, 5.0, 1.5)
 
-# --- DATABASE LIST (Compact & Clean) ---
-# List saham lo yang segunung itu tetep masuk semua di sini
+# --- DATABASE LIST (Cleaned) ---
 list_saham = ["GOTO.JK", "BUKA.JK", "EMTK.JK", "INET.JK", "MLPT.JK", "DCII.JK", "ATIC.JK", "GLVA.JK", "MTDL.JK", "WIFI.JK", "LUCK.JK", "AWAN.JK", "CHIP.JK", "ELIT.JK", "CYBR.JK", "GALB.JK", "IRSX.JK", "LUCY.JK", "METI.JK", "NINE.JK", "BBCA.JK", "BBRI.JK", "BMRI.JK", "BBNI.JK", "ARTO.JK", "BRIS.JK", "BBTN.JK", "BDMN.JK", "PNBN.JK", "BJBR.JK", "BJTM.JK", "BNLI.JK", "BVIC.JK", "MEGA.JK", "BNGA.JK", "ADMF.JK", "CFIN.JK", "BBYB.JK", "BINA.JK", "DNAR.JK", "AGRO.JK", "BABP.JK", "BACA.JK", "BAEK.JK", 
 "BCIC.JK", "BEKS.JK", "BGTG.JK", "MAYA.JK", "MCOR.JK", "NISP.JK", "NOBU.JK", "PNBS.JK", "SDRA.JK", "VICI.JK", "AMAR.JK", "MASB.JK", "ADRO.JK", "PTBA.JK", "ITMG.JK", "HRUM.JK", "INDY.JK", "MEDC.JK", "ENRG.JK", "PGAS.JK", "AKRA.JK", "DOID.JK", "BUMI.JK", "RMKE.JK", "ELSA.JK", "ADMR.JK", "MBMA.JK", "KKGI.JK", "GEMS.JK", "SGER.JK", "BYAN.JK", "RAJA.JK", "APEX.JK", "ARTI.JK", "BIPI.JK", "BOSS.JK", "DEWA.JK", "TOBA.JK", "IATA.JK", "INPS.JK", "JSKY.JK", "KOPI.JK", "MBSS.JK", "MCOL.JK", "MITI.JK", "MTFN.JK", 
 "MYOH.JK", "PKPK.JK", "RUIS.JK", "SURE.JK", "WOWS.JK", "TEBE.JK", "UNVR.JK", "ICBP.JK", "INDF.JK", "AMRT.JK", "MIDI.JK", "CPIN.JK", "JPFA.JK", "MAIN.JK", "MYOR.JK", "GGRM.JK", "HMSP.JK", "DSNG.JK", "AALI.JK", "LSIP.JK", "TAPG.JK", "STAA.JK", "TBLA.JK", "CLEO.JK", "ROTI.JK", "WMPP.JK", "ADES.JK", "AISA.JK", "ALTO.JK", "ANDI.JK", "BEEF.JK", "CAMP.JK", "CEKA.JK", "DLTA.JK", "FOOD.JK", "GOOD.JK", "HOKI.JK", "IKAN.JK", "KEJU.JK", "MLBI.JK", "PCAR.JK", "PSDN.JK", "SKBM.JK", "SKLT.JK", "STTP.JK", "ULTJ.JK", 
@@ -52,16 +76,14 @@ list_saham = ["GOTO.JK", "BUKA.JK", "EMTK.JK", "INET.JK", "MLPT.JK", "DCII.JK", 
 "IFII.JK", "SOCI.JK", "PDPP.JK", "RATU.JK", "JGLE.JK", "PSKT.JK", "BBHI.JK", "KUAS.JK", "RMKO.JK", "CLAY.JK", "ENAK.JK", "VKTR.JK", "PART.JK", "UNSP.JK", "ZATA.JK", "BSKL.JK", "AMMN.JK", "TKIM.JK", "KRAS.JK", "NICL.JK", "DKFT.JK", "FORE.JK", "FPNI.JK", "SOLA.JK", "SMBR.JK", "SMGA.JK", "WTON.JK", "DAAZ.JK", "CHEM.JK", "BSBK.JK", "DKHH.JK", "OPMS.JK", "SSMS.JK", "MINE.JK", "NICE.JK", "PPRI.JK", "NPGF.JK", "SRSN.JK", "CITA.JK", "MOLI.JK", "UDNG.JK", "SMLE.JK", "DGWG.JK", "KAQI.JK", "CLPI.JK",
 "MDKI.JK", "BLES.JK", "IFSH.JK", "BATR.JK", "FWCT.JK", "GGRP.JK", "TBMS.JK", "INCF.JK", "SAMF.JK", "SWID.JK", "LTLS.JK", "OBMD.JK", "UNIC.JK", "SMKL.JK", "CMNT.JK", "KKES.JK", "YELO.JK", "AADI.JK", "CBRE.JK", "LEAD.JK", "BSSR.JK", "ATLA.JK", "FIRE.JK", "DSSA.JK", "BBRM.JK", "PSAT.JK", "MAHA.JK", "TPMA.JK", "BOAT.JK", "WINS.JK", "SICO.JK", "MBAP.JK", "BSML.JK", "MEJA.JK", "ITMA.JK", "DWGL.JK", "GTBO.JK", "ARII.JK", "MKAP.JK", "RIGS.JK", "CANI.JK", "PTIS.JK", "SUNI.JK", "GZCO.JK", "BWPT.JK",
 "ASHA.JK", "CPRO.JK", "WMUU.JK", "NASI.JK", "SIMP.JK", "CLEO.JK", "HOKI.JK", "SMAR.JK", "AYAM.JK", "DSFI.JK", "PTPS.JK", "NSSS.JK", "DEWI.JK", "ISEA.JK", "CMRY.JK", "ANJT.JK", "WAPO.JK", "JAWA.JK", "CSRA.JK", "DPUM.JK", "NEST.JK", "GULA.JK", "PSDN.JK", "IBOS.JK", "STRK.JK", "TAYS.JK", "KEJU.JK", "PSGO.JK", "BISI.JK", "ENZO.JK", "GRPM.JK", "NAYZ.JK", "YUPI.JK", "TLDN.JK", "MKTR.JK", "CRAB.JK", "FISH.JK", "BOBA.JK", "SUPA.JK", "BBYB.JK", "BBKP.JK", "INPC.JK", "TRUE.JK", "MHKI.JK", "LAJU.JK",]
-  
-# Tambahkan manual saham yang lagi hot di sini jika perlu
-list_saham = list(set(list_saham)) # Menghapus duplikat
 
 # --- ENGINE ---
 st.title("⚡ Theta Turbo - High Speed Scanner")
 st.write(f"Status: **Scanning {len(list_saham)} Saham** | Update: {datetime.now(jakarta_tz).strftime('%H:%M:%S')} WIB")
 
-@st.cache_data(ttl=60) # Cache 1 menit biar gak kena ban Yahoo Finance
+@st.cache_data(ttl=60)
 def fetch_data_masal(tickers):
+    # Download data 10 hari terakhir (15m interval)
     return yf.download(tickers, period="10d", interval="15m", group_by='ticker', progress=False, threads=True)
 
 all_data = fetch_data_masal(list_saham)
@@ -71,31 +93,27 @@ if all_data is not None and not all_data.empty:
     
     for ticker in list_saham:
         try:
+            # Ambil data per ticker
             if ticker not in all_data.columns.get_level_values(0): continue
             df = all_data[ticker].copy().dropna()
             if len(df) < 50: continue
 
-            # --- INDICATOR CALCULATOR ---
-            df['RSI'] = ta.rsi(df['Close'], length=14)
-            df['RSI_EMA'] = ta.ema(df['RSI'], length=14)
-            
-            macd = ta.macd(df['Close'])
-            df['MACDH'] = macd.iloc[:, 1] if macd is not None else 0
-
-            df['EMA20'] = ta.ema(df['Close'], length=20)
-            df['EMA50'] = ta.ema(df['Close'], length=50)
-            df['EMA100'] = ta.ema(df['Close'], length=100)
-            df['Vol_Avg'] = df['Volume'].rolling(window=20).mean()
+            # --- CALCULATE INDICATORS ---
+            df = calculate_indicators(df)
 
             last = df.iloc[-1]
             prev = df.iloc[-2]
 
             # --- SCORING SYSTEM ---
             score = 0
-            if last['RSI'] > last['RSI_EMA'] and prev['RSI'] <= prev['RSI_EMA']: score += 1 # RSI Cross
-            if last['MACDH'] > 0 and last['MACDH'] > prev['MACDH']: score += 1 # MACD Bullish
-            if last['Close'] > last['EMA20'] > last['EMA50']: score += 1 # Trend Strong
-            if last['Volume'] > (last['Vol_Avg'] * vol_threshold): score += 1 # Volume Spike
+            # 1. RSI Cross Up EMA RSI
+            if last['RSI'] > last['RSI_EMA'] and prev['RSI'] <= prev['RSI_EMA']: score += 1
+            # 2. MACD Bullish (Histogram naik)
+            if last['MACDH'] > 0 and last['MACDH'] > prev['MACDH']: score += 1
+            # 3. EMA Trend Bullish
+            if last['Close'] > last['EMA20'] > last['EMA50']: score += 1
+            # 4. Volume Spike
+            if last['Volume'] > (last['Vol_Avg'] * vol_threshold): score += 1
 
             if score >= min_score_filter:
                 clean_tck = ticker.replace(".JK", "")
@@ -111,14 +129,14 @@ if all_data is not None and not all_data.empty:
                     "EMA_Trend": "Bullish" if last['Close'] > last['EMA100'] else "Retrace"
                 })
 
-                # --- TELEGRAM SENDER ---
                 if score == 4 and tele_notif:
                     msg = (f"⚡ *THETA SIGNAL: {clean_tck}* ⚡\n"
                            f"Price: `{int(last['Close'])}` | Score: *4/4*\n"
                            f"RSI: `{last['RSI']:.1f}` | Vol: `{v_ratio:.2f}x`")
                     send_telegram(msg)
 
-        except: continue
+        except Exception as e:
+            continue
 
     if results:
         res_df = pd.DataFrame(results).sort_values("Score", ascending=False)
