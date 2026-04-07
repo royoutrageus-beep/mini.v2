@@ -3,129 +3,872 @@ import pandas as pd
 import streamlit as st
 import time
 import requests
-import pytz
 import numpy as np
+import pytz
 from datetime import datetime
 
-# --- CONFIG ---
-TOKEN = st.secrets["TELEGRAM_TOKEN"]
-CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+# ─────────────────────────────────────────────
+#  CONFIG
+# ─────────────────────────────────────────────
+TOKEN      = st.secrets["TELEGRAM_TOKEN"]
+CHAT_ID    = st.secrets["TELEGRAM_CHAT_ID"]
 jakarta_tz = pytz.timezone('Asia/Jakarta')
 
-st.set_page_config(layout="wide", page_title="Theta Turbo V4.0", page_icon="⚡")
+st.set_page_config(
+    layout="wide",
+    page_title="Theta Turbo v4",
+    page_icon="🔥",
+    initial_sidebar_state="collapsed",
+)
 
-# --- FUNGSI INDIKATOR MANUAL ---
-def calculate_indicators(df):
-    # EMA 20, 50, 100
-    df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
-    df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
-    df['EMA100'] = df['Close'].ewm(span=100, adjust=False).mean()
-    
-    # RSI (14)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    df['RSI_EMA'] = df['RSI'].ewm(span=14, adjust=False).mean()
-    
-    # MACD (12, 26, 9)
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACDH'] = df['MACD'] - df['MACD_Signal']
-    
-    # Volume Average
-    df['Vol_Avg'] = df['Volume'].rolling(window=20).mean()
+# ─────────────────────────────────────────────
+#  CSS — sama tema QuantEdge
+# ─────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap');
+:root {
+    --bg:#080c10; --surface:#0d1117; --border:#1c2533;
+    --accent:#00e5ff; --green:#00ff88; --red:#ff3d5a;
+    --amber:#ffb700; --purple:#bf5fff; --orange:#ff7b00;
+    --muted:#4a5568; --text:#c9d1d9; --heading:#e6edf3;
+}
+html,body,[data-testid="stAppViewContainer"]{
+    background:var(--bg)!important; color:var(--text)!important;
+    font-family:'Syne',sans-serif;
+}
+#MainMenu,footer,header{visibility:hidden;}
+[data-testid="stSidebar"]{display:none!important;}
+
+[data-testid="stExpander"]{
+    background:var(--surface)!important; border:1px solid var(--border)!important;
+    border-radius:8px!important; margin-bottom:12px!important;
+}
+[data-testid="stExpander"] summary{
+    font-family:'Space Mono',monospace!important; font-size:12px!important;
+    color:var(--accent)!important; letter-spacing:1px!important;
+}
+.settings-label{
+    font-family:'Space Mono',monospace; font-size:10px; color:var(--muted);
+    letter-spacing:2px; margin-bottom:10px; padding-bottom:6px;
+    border-bottom:1px solid var(--border);
+}
+
+/* Header */
+.tt-header{
+    display:flex; align-items:center; padding:16px 0 12px 0;
+    border-bottom:1px solid var(--border); margin-bottom:16px;
+}
+.tt-logo{font-family:'Space Mono',monospace; font-size:22px; font-weight:700; color:var(--orange); letter-spacing:-1px;}
+.tt-sub{font-size:11px; color:var(--muted); letter-spacing:2px; text-transform:uppercase;}
+
+/* Live badge */
+.live-badge{
+    display:inline-flex; align-items:center; gap:6px;
+    padding:4px 12px; background:rgba(0,229,255,.08);
+    border:1px solid rgba(0,229,255,.3); border-radius:20px;
+    font-family:'Space Mono',monospace; font-size:10px; color:var(--accent);
+    letter-spacing:1px; margin-left:auto;
+}
+.live-dot{
+    width:6px; height:6px; background:var(--green); border-radius:50%;
+    animation:blink 1s infinite;
+}
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:.2;}}
+
+/* Metric cards */
+.metric-row{display:flex; gap:10px; margin-bottom:18px; flex-wrap:wrap;}
+.metric-card{
+    flex:1; min-width:110px; background:var(--surface);
+    border:1px solid var(--border); border-radius:8px;
+    padding:12px 14px; position:relative; overflow:hidden;
+}
+.metric-card::before{content:''; position:absolute; top:0; left:0; right:0; height:2px; background:var(--accent);}
+.metric-card.green::before{background:var(--green);}
+.metric-card.red::before{background:var(--red);}
+.metric-card.amber::before{background:var(--amber);}
+.metric-card.orange::before{background:var(--orange);}
+.metric-label{font-size:10px; color:var(--muted); letter-spacing:1.5px; text-transform:uppercase; margin-bottom:4px;}
+.metric-value{font-family:'Space Mono',monospace; font-size:24px; font-weight:700; color:var(--heading); line-height:1;}
+.metric-sub{font-size:10px; color:var(--muted); margin-top:3px;}
+
+/* Signal cards */
+.signal-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px; margin-bottom:20px;}
+.signal-card{
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:10px; padding:16px; position:relative; overflow:hidden;
+    transition:border-color .2s;
+}
+.signal-card.gacor{border-color:rgba(0,255,136,.4); background:rgba(0,255,136,.03);}
+.signal-card.potensial{border-color:rgba(255,183,0,.3); background:rgba(255,183,0,.03);}
+.signal-card.watch{border-color:rgba(0,229,255,.2);}
+.signal-card::after{
+    content:''; position:absolute; top:0; left:0; width:4px; height:100%;
+}
+.signal-card.gacor::after{background:var(--green);}
+.signal-card.potensial::after{background:var(--amber);}
+.signal-card.watch::after{background:var(--accent);}
+
+.sc-ticker{font-family:'Space Mono',monospace; font-size:18px; font-weight:700; color:var(--heading);}
+.sc-price{font-family:'Space Mono',monospace; font-size:13px; color:var(--muted);}
+.sc-signal{font-size:13px; font-weight:700; margin:6px 0;}
+.sc-bars{display:flex; gap:3px; margin:8px 0;}
+.sc-bar{height:16px; border-radius:2px; transition:width .3s;}
+.sc-bar.filled{background:var(--green);}
+.sc-bar.empty{background:var(--border);}
+.sc-bar.amber{background:var(--amber);}
+.sc-stats{display:flex; gap:12px; flex-wrap:wrap; margin-top:8px;}
+.sc-stat{font-family:'Space Mono',monospace; font-size:10px; color:var(--muted);}
+.sc-stat span{color:var(--text);}
+
+/* Alert box */
+.alert-box{
+    background:rgba(255,61,90,.06); border:1px solid rgba(255,61,90,.4);
+    border-radius:8px; padding:14px 18px; margin-bottom:16px;
+    animation:pulse-border 2s infinite;
+}
+@keyframes pulse-border{0%,100%{border-color:rgba(255,61,90,.4);}50%{border-color:rgba(255,61,90,.9);}}
+.alert-title{color:var(--red); font-family:'Space Mono',monospace; font-size:12px; font-weight:700; letter-spacing:2px;}
+
+/* Ticker tape */
+.tape-wrap{
+    overflow:hidden; white-space:nowrap; border-top:1px solid var(--border);
+    border-bottom:1px solid var(--border); padding:5px 0; margin-bottom:16px;
+    background:var(--surface);
+}
+.tape-inner{display:inline-block; animation:marquee 35s linear infinite;}
+@keyframes marquee{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+.tape-item{display:inline-block; margin:0 18px; font-family:'Space Mono',monospace; font-size:10px;}
+.tape-item.up{color:var(--green);} .tape-item.down{color:var(--red);} .tape-item.flat{color:var(--muted);}
+
+/* Table */
+[data-testid="stDataFrame"]{border:1px solid var(--border)!important; border-radius:8px!important;}
+[data-testid="stDataFrame"] thead th{
+    background:var(--surface)!important; color:var(--muted)!important;
+    font-family:'Space Mono',monospace!important; font-size:11px!important;
+    letter-spacing:1px!important; text-transform:uppercase!important;
+}
+::-webkit-scrollbar{width:4px; height:4px;}
+::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:var(--border); border-radius:2px;}
+[data-testid="stNumberInput"] input{
+    background:var(--surface)!important; border:1px solid var(--border)!important;
+    color:var(--heading)!important; font-family:'Space Mono',monospace!important; border-radius:6px!important;
+}
+button[data-testid="baseButton-primary"]{
+    background:var(--orange)!important; color:var(--bg)!important;
+    font-family:'Space Mono',monospace!important; font-weight:700!important; border:none!important;
+}
+.section-title{
+    font-family:'Space Mono',monospace; font-size:11px; color:var(--muted);
+    letter-spacing:2px; text-transform:uppercase; border-left:3px solid var(--orange);
+    padding-left:10px; margin:20px 0 10px 0;
+}
+@media(max-width:768px){
+    .main .block-container{padding-left:.75rem!important; padding-right:.75rem!important;}
+    .signal-grid{grid-template-columns:1fr;}
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+#  STOCK LIST
+# ─────────────────────────────────────────────
+raw_stocks = [
+    "GOTO","BUKA","EMTK","INET","MLPT","DCII","ATIC","GLVA","MTDL","WIFI","LUCK","AWAN","CHIP","ELIT","CYBR","GALB","IRSX","LUCY","METI","NINE",
+    "BBCA","BBRI","BMRI","BBNI","ARTO","BRIS","BBTN","BDMN","PNBN","BJBR","BJTM","BNLI","BVIC","MEGA","BNGA","ADMF","CFIN","BBYB","BINA","DNAR",
+    "AGRO","BABP","BACA","BAEK","BCIC","BEKS","BGTG","MAYA","MCOR","NISP","NOBU","PNBS","SDRA","VICI","AMAR","MASB",
+    "ADRO","PTBA","ITMG","HRUM","INDY","MEDC","ENRG","PGAS","AKRA","DOID","BUMI","RMKE","ELSA","ADMR","MBMA","KKGI","GEMS","SGER","BYAN","RAJA",
+    "APEX","ARTI","BIPI","BOSS","DEWA","TOBA","IATA","INPS","JSKY","KOPI","MBSS","MCOL","MITI","MTFN","MYOH","PKPK","RUIS","SURE","WOWS","TEBE",
+    "UNVR","ICBP","INDF","AMRT","MIDI","CPIN","JPFA","MAIN","MYOR","GGRM","HMSP","DSNG","AALI","LSIP","TAPG","STAA","TBLA","CLEO","ROTI","WMPP",
+    "ADES","AISA","ALTO","ANDI","BEEF","CAMP","CEKA","DLTA","FOOD","GOOD","HOKI","IKAN","KEJU","MLBI","PCAR","PSDN","SKBM","SKLT","STTP","ULTJ",
+    "MAPI","ACES","ERAA","ASII","SMSM","IMAS","GJTL","MNCN","SCMA","RALS","LPPF","PNLF","MAPA","AUTO","MASA","PANI","BIRD","FILM",
+    "KLBF","MIKA","HEAL","SILO","PRDA","SAME","PEHA","PYFA","IRRA","KAEF","INAF","DGNS","BMHS","TSPC","DVLA","MERK","SIDO","SOHO","PRIM","RSGK",
+    "TLKM","ISAT","EXCL","JSMR","BREN","POWR","KEEN","ADHI","PTPP","WIKA","WKTK","META","TOWR","TBIG","PGEO","BRPT","FREN","LINK",
+    "BSDE","PWON","SMRA","CTRA","ASRI","MKPI","DILD","LPCK","LPKR","DMAS","BEST","KIJA","MTLA","JRPT",
+    "UNTR","ARNA","ASGR","IMPC","MLIA","HEXA","GMFI","ABMM","KMTR","SPTO","VOKS","AMFG","APLI","BRAM","KBLI","KBLM","LION","SCCO","TPIA",
+    "ANTM","INCO","TINS","MDKA","SMGR","INTP","INKP","NCKL","AVIA","ESSA","SRTG","AGII",
+    "AMMN","TKIM","KRAS","NICL","DKFT","WTON","SMBR","BRMS","CUAN","PTRO","EMAS",
+    "AADI","BSSR","DSSA","MBAP","FIRE","ATLA","TPMA","BOAT","WINS","BBRM","GTBO","ARII","RIGS","MAHA","ITMA",
+    "ASHA","CPRO","SIMP","SMAR","AYAM","DSFI","CMRY","ANJT","BISI","NAYZ","YUPI","CRAB","FISH","BOBA","SUPA",
+    "BBHI","VKTR","FORE","FPNI","SOLA","DAAZ","CHEM","SSMS","MINE","NICE","SRSN","CITA","MOLI","SMLE",
+    "FAST","ALII","ERAL","DATA","PBRX","TRIS","NETV","COIN","MDIA","BULL","CBDK","OKAS","IFII","SOCI","PSKT",
+    "BBKP","INPC","TRUE","LAJU","HRTA","BRNA","AKPI","IPOL","PACK","PBID","JARR","PGUN","UANG","PPRE",
+]
+seen = set(); raw_stocks = [x for x in raw_stocks if not (x in seen or seen.add(x))]
+stocks_yf = [s + ".JK" for s in raw_stocks]
+stock_map  = {s + ".JK": s for s in raw_stocks}
+
+# ─────────────────────────────────────────────
+#  HEADER
+# ─────────────────────────────────────────────
+now_jkt = datetime.now(jakarta_tz)
+st.markdown(f"""
+<div class="tt-header">
+  <div>
+    <div class="tt-logo">🔥 THETA TURBO</div>
+    <div class="tt-sub">Intraday 15M Scanner · Scalping & Momentum Engine v4.0</div>
+  </div>
+  <div class="live-badge">
+    <div class="live-dot"></div>
+    LIVE {now_jkt.strftime("%H:%M:%S")} WIB
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+#  SETTINGS
+# ─────────────────────────────────────────────
+with st.expander("⚙️  Scanner Settings", expanded=False):
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        st.markdown('<div class="settings-label">MODE SIGNAL</div>', unsafe_allow_html=True)
+        scan_mode    = st.radio("Mode", ["Scalping ⚡","Momentum 🚀","Reversal 🎯"], label_visibility="collapsed")
+        tele_on      = st.toggle("📡 Telegram Alert", value=True)
+    with sc2:
+        st.markdown('<div class="settings-label">FILTER</div>', unsafe_allow_html=True)
+        min_score    = st.slider("Min Score (0-6)", 0, 6, 4, key="msc")
+        vol_thresh   = st.slider("Min RVOL Spike", 1.0, 5.0, 1.5, 0.1, key="vol")
+        min_turn     = st.number_input("Min Turnover (M Rp)", value=500, step=100, key="trn") * 1_000_000
+    with sc3:
+        st.markdown('<div class="settings-label">TAMPILAN</div>', unsafe_allow_html=True)
+        view_mode    = st.radio("View", ["Card View 🃏","Table View 📊"], label_visibility="collapsed")
+        st.caption("🔄 Auto-refresh tiap 300 detik")
+        st.caption(f"📊 {len(raw_stocks)} emiten dipantau")
+        st.caption("⏱️ Data interval: 15 menit")
+
+# ─────────────────────────────────────────────
+#  INDICATOR ENGINE (dioptimasi untuk 15M)
+# ─────────────────────────────────────────────
+def ema(s, n): return s.ewm(span=n, adjust=False).mean()
+
+def rsi_smooth(s, p=14, smooth=3):
+    """RSI di-smooth EMA — kurangi noise di timeframe pendek"""
+    delta = s.diff()
+    gain  = delta.clip(lower=0).rolling(p).mean()
+    loss  = (-delta.clip(upper=0)).rolling(p).mean()
+    rs    = gain / loss.replace(0, np.nan)
+    raw   = 100 - 100/(1+rs)
+    return raw, ema(raw, smooth)  # raw + smooth version
+
+def stochastic(h, l, c, k=14, d=3):
+    """Stochastic %K/%D — deteksi reversal dari oversold/overbought"""
+    ll = l.rolling(k).min()
+    hh = h.rolling(k).max()
+    K  = 100*(c-ll)/(hh-ll).replace(0,np.nan)
+    D  = K.rolling(d).mean()
+    return K.fillna(50), D.fillna(50)
+
+def macd(s, f=12, sl=26, sg=9):
+    ml  = ema(s,f) - ema(s,sl)
+    sig = ema(ml,sg)
+    return ml, sig, ml-sig
+
+def vwap(df):
+    """VWAP — benchmark price intraday, kunci support/resistance"""
+    tp  = (df['High'] + df['Low'] + df['Close']) / 3
+    return (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
+
+def apply_intraday_indicators(df):
+    # EMA pendek untuk scalping
+    df['EMA9']   = ema(df['Close'], 9)
+    df['EMA21']  = ema(df['Close'], 21)
+    df['EMA50']  = ema(df['Close'], 50)
+    df['EMA200'] = ema(df['Close'], 200)
+
+    # RSI + RSI-EMA
+    df['RSI'], df['RSI_EMA'] = rsi_smooth(df['Close'], 14, 3)
+
+    # Stochastic
+    df['STOCH_K'], df['STOCH_D'] = stochastic(df['High'], df['Low'], df['Close'], 14, 3)
+
+    # MACD
+    df['MACD'], df['MACD_Sig'], df['MACD_Hist'] = macd(df['Close'])
+
+    # VWAP
+    try:
+        df['VWAP'] = vwap(df)
+    except:
+        df['VWAP'] = df['Close']
+
+    # Bollinger Bands
+    df['BB_mid']   = df['Close'].rolling(20).mean()
+    df['BB_std']   = df['Close'].rolling(20).std()
+    df['BB_upper'] = df['BB_mid'] + 2*df['BB_std']
+    df['BB_lower'] = df['BB_mid'] - 2*df['BB_std']
+    df['BB_pct']   = (df['Close']-df['BB_lower'])/(df['BB_upper']-df['BB_lower'])
+
+    # Volume
+    df['AvgVol']   = df['Volume'].rolling(20).mean()
+    df['RVOL']     = df['Volume'] / df['AvgVol']
+
+    # Net Volume Flow (15M)
+    df['NetVol']   = np.where(df['Close'] >= df['Open'], df['Volume'], -df['Volume'])
+    df['NetVol3']  = pd.Series(df['NetVol'], index=df.index).rolling(3).sum()
+    df['NetVol8']  = pd.Series(df['NetVol'], index=df.index).rolling(8).sum()
+
+    # Volume climax — lonjakan tiba-tiba
+    df['VolSpike'] = df['RVOL'] > 2.5
+
+    # Candle
+    df['Body']      = (df['Close'] - df['Open']).abs()
+    df['BodyRatio'] = df['Body'] / (df['High'] - df['Low']).replace(0, np.nan)
+    df['BullBar']   = (df['Close'] > df['Open']) & (df['BodyRatio'] > 0.5)
+
+    # Price momentum
+    df['ROC3']  = df['Close'].pct_change(3)
+    df['ROC8']  = df['Close'].pct_change(8)
+
+    # Higher Highs / Higher Lows (trend intraday)
+    df['HH'] = df['High'] > df['High'].shift(1)
+    df['HL'] = df['Low']  > df['Low'].shift(1)
+    df['LL'] = df['Low']  < df['Low'].shift(1)
+    df['LH'] = df['High'] < df['High'].shift(1)
+
     return df
 
-def send_telegram(message):
+# ─────────────────────────────────────────────
+#  SCORING ENGINE (per mode)
+# ─────────────────────────────────────────────
+def score_scalping(r, p, p2):
+    """
+    SCALPING — sinyal cepat 15M
+    Focus: EMA9/21 stack + MACD hist + volume spike + momentum candle
+    Max score: 6
+    """
+    score=0; reasons=[]; details={}
+
+    # 1. EMA stack (tren mikro)
+    if r['EMA9']>r['EMA21']>r['EMA50']:
+        score+=1.5; reasons.append("EMA stack ▲"); details['ema']='bullish'
+    elif r['EMA9']>r['EMA21']:
+        score+=0.8; reasons.append("EMA9>21"); details['ema']='partial'
+    else:
+        details['ema']='bearish'
+
+    # 2. Price di atas VWAP (intraday bias)
+    if r['Close']>r['VWAP']:
+        score+=1; reasons.append("Above VWAP"); details['vwap']='above'
+    else:
+        details['vwap']='below'
+
+    # 3. MACD histogram expanding positive
+    if r['MACD_Hist']>0 and r['MACD_Hist']>float(p['MACD_Hist']):
+        score+=1.5; reasons.append("MACD hist expanding ✦")
+        if p2 is not None and float(p['MACD_Hist'])>float(p2['MACD_Hist']):
+            score+=0.3; reasons.append("MACD 3 bar rising")
+    elif r['MACD_Hist']>0:
+        score+=0.5; reasons.append("MACD hist +")
+
+    # 4. RSI-EMA zona momentum (50-70, bukan overbought)
+    rsi_e = float(r['RSI_EMA'])
+    if 52<rsi_e<68:
+        score+=0.8; reasons.append(f"RSI-EMA={rsi_e:.1f}"); details['rsi']='momentum'
+    elif rsi_e>=68:
+        score-=0.5; details['rsi']='overbought'
+    else:
+        details['rsi']='weak'
+
+    # 5. Volume spike konfirmasi
+    rvol = float(r['RVOL'])
+    if rvol>2.0:
+        score+=1; reasons.append(f"RVOL={rvol:.1f}x surge")
+    elif rvol>1.5:
+        score+=0.6; reasons.append(f"RVOL={rvol:.1f}x")
+
+    # 6. Bullish candle body
+    if bool(r['BullBar']):
+        score+=0.5; reasons.append("Bullish bar")
+
+    # 7. Net volume positif
+    if float(r['NetVol3'])>0:
+        score+=0.4; reasons.append("Net vol +")
+
+    # Disqualifier: harga di bawah EMA200 di 15M
+    if r['Close']<r['EMA200']*0.98:
+        score-=0.5
+
+    return max(0,min(6,round(score,1))), reasons, details
+
+
+def score_momentum(r, p, p2):
+    """
+    MOMENTUM — breakout dan trend continuation
+    Focus: Breakout high, volume, stochastic, ROC
+    Max score: 6
+    """
+    score=0; reasons=[]; details={}
+
+    # 1. Breakout: Higher High + Higher Low (3 bar)
+    hh = bool(r['HH']); hl = bool(r['HL'])
+    if hh and hl:
+        score+=1.5; reasons.append("HH+HL pattern ▲"); details['trend']='strong'
+    elif hh:
+        score+=0.8; details['trend']='moderate'
+    else:
+        details['trend']='weak'
+
+    # 2. Volume surge besar
+    rvol=float(r['RVOL'])
+    if rvol>3.0:   score+=1.5; reasons.append(f"RVOL={rvol:.1f}x SURGE 🔥")
+    elif rvol>2.0: score+=1.0; reasons.append(f"RVOL={rvol:.1f}x")
+    elif rvol>1.5: score+=0.5
+
+    # 3. ROC kuat (accelerasi harga)
+    roc = float(r['ROC3'])*100
+    if roc>2.0:   score+=1.5; reasons.append(f"ROC3={roc:.1f}%")
+    elif roc>1.0: score+=0.8; reasons.append(f"ROC3={roc:.1f}%")
+    elif roc<0:   score-=0.5
+
+    # 4. RSI-EMA zone momentum
+    rsi_e=float(r['RSI_EMA'])
+    if 55<rsi_e<75: score+=0.8; reasons.append(f"RSI-EMA={rsi_e:.1f}")
+    if rsi_e>78: score-=0.8; reasons.append("⚠️ RSI overbought")
+    details['rsi_e']=rsi_e
+
+    # 5. Stochastic momentum zone
+    sk=float(r['STOCH_K']); sd=float(r['STOCH_D'])
+    if sk>60 and sk>sd:
+        score+=0.8; reasons.append("STOCH K>D bullish")
+
+    # 6. MACD
+    if r['MACD_Hist']>0 and r['MACD_Hist']>float(p['MACD_Hist']):
+        score+=0.8; reasons.append("MACD expanding")
+
+    # 7. Above VWAP
+    if r['Close']>r['VWAP']:
+        score+=0.5; reasons.append("Above VWAP")
+
+    return max(0,min(6,round(score,1))), reasons, details
+
+
+def score_reversal(r, p, p2):
+    """
+    REVERSAL — tangkap pembalikan dari oversold intraday
+    Focus: Stochastic cross + RSI-EMA pivot + volume climax + BB lower
+    Max score: 6
+    """
+    score=0; reasons=[]; details={}
+
+    # 1. Oversold multi-konfirmasi
+    os_count=0
+    rsi_e=float(r['RSI_EMA'])
+    if rsi_e<30:   os_count+=1; score+=1.5; reasons.append(f"RSI-EMA={rsi_e:.1f} OS extreme")
+    elif rsi_e<40: os_count+=1; score+=0.8; reasons.append(f"RSI-EMA={rsi_e:.1f} OS")
+
+    sk=float(r['STOCH_K']); sd=float(r['STOCH_D'])
+    if sk<20:  os_count+=1; score+=1; reasons.append(f"STOCH={sk:.0f} extreme OS")
+    elif sk<30: os_count+=1; score+=0.5
+
+    bp=float(r['BB_pct'])
+    if bp<0.05:  os_count+=1; score+=1; reasons.append("BB lower touch")
+    elif bp<0.15: os_count+=1; score+=0.5
+
+    # Gate: belum oversold cukup
+    if os_count<1.5: return 0,[],{}
+
+    # 2. Reversal konfirmasi — WAJIB ada
+    rev=0
+    pk=float(p['STOCH_K']); pd_=float(p['STOCH_D'])
+    if sk<30 and sk>sd and pk<=pd_:
+        rev+=1; score+=2; reasons.append("STOCH %K cross ↑ OS ✦✦")
+    elif sk<25 and sk>sd:
+        rev+=1; score+=1.2; reasons.append("STOCH K>D extreme OS")
+
+    if p is not None:
+        rsi_p=float(p['RSI_EMA'])
+        if rsi_e>rsi_p and rsi_e<42:
+            rev+=1; score+=1.2; reasons.append("RSI-EMA pivot ↑")
+
+    mh=float(r['MACD_Hist']); mh_p=float(p['MACD_Hist'])
+    if mh>mh_p and mh<0:
+        rev+=1; score+=0.8; reasons.append("MACD hist diverge ↑")
+
+    # Gate: tidak ada reversal → penalti
+    if rev==0: score*=0.3
+
+    # 3. Volume exhaustion
+    if bool(r['VolSpike']) and float(r['Close'])<float(r['Open']):
+        score+=0.8; reasons.append("Volume climax sell")
+    elif float(r['RVOL'])>1.5:
+        score+=0.4
+
+    # 4. Net volume turning
+    if float(r['NetVol3'])>0:
+        score+=0.5; reasons.append("Net vol turning +")
+
+    # Bearish candle kuat = belum waktunya
+    if float(r['BodyRatio'])>0.75 and float(r['Close'])<float(r['Open']):
+        score-=0.8; reasons.append("⚠️ Bearish bar kuat")
+
+    details['os_count']=os_count; details['rev']=rev
+    return max(0,min(6,round(score,1))), reasons, details
+
+
+def get_signal(score, mode):
+    thresholds = {
+        "Scalping ⚡":  {5:"GACOR ⚡",4:"POTENSIAL 🔥",3:"WATCH 👀"},
+        "Momentum 🚀":  {5:"GACOR 🚀",4:"POTENSIAL 🔥",3:"WATCH 👀"},
+        "Reversal 🎯":  {5:"REVERSAL 🎯",4:"POTENSIAL 🔥",3:"WATCH 👀"},
+    }
+    t = thresholds.get(mode, {})
+    for thresh in sorted(t.keys(), reverse=True):
+        if score >= thresh: return t[thresh]
+    return "WAIT"
+
+def get_card_class(signal):
+    if "GACOR" in signal or "REVERSAL" in signal: return "gacor"
+    if "POTENSIAL" in signal: return "potensial"
+    if "WATCH" in signal: return "watch"
+    return ""
+
+# ─────────────────────────────────────────────
+#  TELEGRAM — format eye-catching
+# ─────────────────────────────────────────────
+def send_telegram_alert(results_top):
+    now = datetime.now(jakarta_tz)
+    is_open = 9 <= now.hour < 16
+
+    header = (
+        f"{'🔴 MARKET OPEN' if is_open else '🌙 AFTER HOURS'}\n"
+        f"🔥 *THETA TURBO ALERT*\n"
+        f"⏰ `{now.strftime('%H:%M:%S')} WIB` · `{now.strftime('%d %b %Y')}`\n"
+        f"{'━'*28}\n"
+    )
+
+    body = ""
+    for r in results_top[:5]:  # max 5 per blast
+        sig = r['Signal']
+        emoji = "🏆" if "GACOR" in sig else ("🔥" if "POTENSIAL" in sig else "👀")
+        trend_e = "📈" if "▲" in r.get('Trend','') else ("📉" if "▼" in r.get('Trend','') else "➡️")
+
+        # Score bar visual
+        score_int = int(r['Score'])
+        bar = "█"*score_int + "░"*(6-score_int)
+
+        body += (
+            f"\n{emoji} *{r['Ticker']}*  `{sig}`\n"
+            f"   💰 Price: `{r['Price']:,}` {trend_e}\n"
+            f"   📊 Score: `[{bar}] {r['Score']}/6`\n"
+            f"   📈 RSI-EMA: `{r['RSI-EMA']}` | STOCH: `{r['Stoch K']}`\n"
+            f"   🌊 RVOL: `{r['RVOL']}x` | MACD: `{r['MACD Hist']}`\n"
+            f"   🎯 TP: `{r['TP']:,}` | 🛑 SL: `{r['SL']:,}` | R:R `{r['R:R']}`\n"
+            f"   💡 _{r['Reasons'][:60]}_\n"
+        )
+
+    footer = (
+        f"\n{'━'*28}\n"
+        f"⚡ _Theta Turbo v4 · 15M Intraday_\n"
+        f"⚠️ _BUKAN saran investasi. DYOR!_"
+    )
+
+    full_msg = header + body + footer
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=5)
+        requests.post(url, data={"chat_id": CHAT_ID, "text": full_msg, "parse_mode": "Markdown"}, timeout=10)
+    except Exception as e:
+        st.error(f"Telegram error: {e}")
+
+
+def send_telegram_gacor(row):
+    """Alert khusus score = 6 — kirim langsung, high priority"""
+    now  = datetime.now(jakarta_tz)
+    score_bar = "█"*6
+
+    msg = (
+        f"🚨🚨 *SCORE PENUH — {row['Ticker']}* 🚨🚨\n"
+        f"{'━'*28}\n"
+        f"💰 Price: `{row['Price']:,}`\n"
+        f"📊 Score: `[{score_bar}] 6/6` ← MAXIMUM\n"
+        f"📈 RSI-EMA: `{row['RSI-EMA']}` | Stoch K: `{row['Stoch K']}`\n"
+        f"🌊 RVOL: `{row['RVOL']}x` — Volume surge!\n"
+        f"📉 MACD Hist: `{row['MACD Hist']}`\n"
+        f"{'━'*28}\n"
+        f"🎯 TP: `{row['TP']:,}`\n"
+        f"🛑 SL: `{row['SL']:,}`\n"
+        f"⚖️ R:R = `{row['R:R']}`\n"
+        f"{'━'*28}\n"
+        f"💡 _{row['Reasons'][:80]}_\n\n"
+        f"⏰ `{now.strftime('%H:%M:%S')} WIB`\n"
+        f"⚡ _Theta Turbo v4 · 15M_\n"
+        f"⚠️ _BUKAN saran investasi!_"
+    )
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
-# --- UI SIDEBAR ---
-st.sidebar.title("🎮 Command Center")
-tele_notif = st.sidebar.checkbox("🚀 Kirim Notif Telegram", value=False)
-min_score_filter = st.sidebar.slider("Minimal Score Tampil", 2, 4, 3)
-vol_threshold = st.sidebar.slider("Vol Spike Threshold (x)", 1.0, 5.0, 1.5)
 
-# --- DATABASE LIST ---
-list_saham = ["GOTO.JK", "BUKA.JK", "EMTK.JK", "INET.JK", "MLPT.JK", "DCII.JK", "ATIC.JK", "GLVA.JK", "MTDL.JK", "WIFI.JK", "LUCK.JK", "AWAN.JK", "CHIP.JK", "ELIT.JK", "CYBR.JK", "GALB.JK", "IRSX.JK", "LUCY.JK", "METI.JK", "NINE.JK", "BBCA.JK", "BBRI.JK", "BMRI.JK", "BBNI.JK", "ARTO.JK", "BRIS.JK", "BBTN.JK", "BDMN.JK", "PNBN.JK", "BJBR.JK", "BJTM.JK", "BNLI.JK", "BVIC.JK", "MEGA.JK", "BNGA.JK", "ADMF.JK", "CFIN.JK", "BBYB.JK", "BINA.JK", "DNAR.JK", "AGRO.JK", "BABP.JK", "BACA.JK", "BAEK.JK", "BCIC.JK", "BEKS.JK", "BGTG.JK", "MAYA.JK", "MCOR.JK", "NISP.JK", "NOBU.JK", "PNBS.JK", "SDRA.JK", "VICI.JK", "AMAR.JK", "MASB.JK", "ADRO.JK", "PTBA.JK", "ITMG.JK", "HRUM.JK", "INDY.JK", "MEDC.JK", "ENRG.JK", "PGAS.JK", "AKRA.JK", "DOID.JK", "BUMI.JK", "RMKE.JK", "ELSA.JK", "ADMR.JK", "MBMA.JK", "KKGI.JK", "GEMS.JK", "SGER.JK", "BYAN.JK", "RAJA.JK", "APEX.JK", "ARTI.JK", "BIPI.JK", "BOSS.JK", "DEWA.JK", "TOBA.JK", "IATA.JK", "INPS.JK", "JSKY.JK", "KOPI.JK", "MBSS.JK", "MCOL.JK", "MITI.JK", "MTFN.JK", "MYOH.JK", "PKPK.JK", "RUIS.JK", "SURE.JK", "WOWS.JK", "TEBE.JK", "UNVR.JK", "ICBP.JK", "INDF.JK", "AMRT.JK", "MIDI.JK", "CPIN.JK", "JPFA.JK", "MAIN.JK", "MYOR.JK", "GGRM.JK", "HMSP.JK", "DSNG.JK", "AALI.JK", "LSIP.JK", "TAPG.JK", "STAA.JK", "TBLA.JK", "CLEO.JK", "ROTI.JK", "WMPP.JK", "ADES.JK", "AISA.JK", "ALTO.JK", "ANDI.JK", "BEEF.JK", "CAMP.JK", "CEKA.JK", "DLTA.JK", "FOOD.JK", "GOOD.JK", "HOKI.JK", "IKAN.JK", "KEJU.JK", "MLBI.JK", "PCAR.JK", "PSDN.JK", "SKBM.JK", "SKLT.JK", "STTP.JK", "ULTJ.JK", "MAPI.JK", "ACES.JK", "ERAA.JK", "ASII.JK", "SMSM.JK", "IMAS.JK", "GJTL.JK", "MNCN.JK", "SCMA.JK", "RALS.JK", "LPPF.JK", "PNLF.JK", "MAPA.JK", "AUTO.JK", "MASA.JK", "PANI.JK", "BIRD.JK", "FILM.JK", "FORZ.JK", "GLOB.JK", "HERO.JK", "HOME.JK", "HOTL.JK", "ICON.JK", "KBLV.JK", "LPPS.JK", "MICE.JK", "MPPA.JK", "MSIN.JK", "PBSA.JK", "RICY.JK", "TARA.JK", "UNIT.JK", "WOOD.JK", "ZINC.JK", "TOSK.JK", "VIVA.JK", "KDTN.JK", "BELI.JK", "KLBF.JK", "MIKA.JK", "HEAL.JK", "SILO.JK", "PRDA.JK", "SAME.JK", "PEHA.JK", "PYFA.JK", "IRRA.JK", "KAEF.JK", "INAF.JK", "DGNS.JK", "BMHS.JK", "TSPC.JK", "DVLA.JK", "MERK.JK", "SIDO.JK", "SOHO.JK", "PRIM.JK", "RSGK.JK", "TLKM.JK", "ISAT.JK", "EXCL.JK", "JSMR.JK", "BREN.JK", "POWR.JK", "KEEN.JK", "ADHI.JK", "PTPP.JK", "WIKA.JK", "WKTK.JK", "META.JK", "TOWR.JK", "TBIG.JK", "PGEO.JK", "BRPT.JK", "FREN.JK", "LINK.JK", "BALI.JK", "BUKK.JK", "CASS.JK", "CENT.JK", "CMNP.JK", "GAMA.JK", "GHON.JK", "GOLD.JK", "IBST.JK", "IPCC.JK", "JKON.JK", "KARE.JK", "LAPD.JK", "MANT.JK", "NRCA.JK", "OASA.JK", "PBSA.JK", "PORT.JK", "SSIA.JK", "SUPR.JK", "TELE.JK", "TOPS.JK", "UNTR.JK", "ARNA.JK", "ASGR.JK", "IMPC.JK", "MLIA.JK", "HEXA.JK", "GMFI.JK", "BPTR.JK", "ABMM.JK", "WOOD.JK", "KMTR.JK", "SPTO.JK", "VOKS.JK", "AMFG.JK", "APLI.JK", "BRAM.JK", "DYAN.JK", "IKAI.JK", "JECC.JK", "KBLI.JK", "KBLM.JK", "LION.JK", "LMSH.JK", "PICO.JK", "PRAS.JK", "SCCO.JK", "SIPD.JK", "SULI.JK", "TALF.JK", "TIRT.JK", "TPIA.JK", "ANTM.JK", "INCO.JK", "TINS.JK", "MDKA.JK", "SMGR.JK", "INTP.JK", "INKP.JK", "NCKL.JK", "ADMG.JK", "AVIA.JK", "ESSA.JK", "SRTG.JK", "AGII.JK", "ALDO.JK", "ALKA.JK", "BAJA.JK", "BTON.JK", "CTBN.JK", "DPNS.JK", "EKAD.JK", "ETWA.JK", "GDST.JK", "IAAS.JK", "IGAR.JK", "INAI.JK", "INCI.JK", "ISSP.JK", "KBRI.JK", "KDSI.JK", "NIKL.JK", "JIHD.JK", "SMDR.JK", "SMMT.JK", "SPMA.JK", "TOTO.JK", "BSDE.JK", "PWON.JK", "SMRA.JK", "CTRA.JK", "ASRI.JK", "MKPI.JK", "DILD.JK", "LPCK.JK", "LPKR.JK", "DMAS.JK", "BEST.JK", "KIJA.JK", "MTLA.JK", "JRPT.JK", "ADCP.JK", "AMAN.JK", "APLN.JK", "ARMY.JK", "BAPA.JK", "BAPI.JK", "BBSS.JK", "BCIP.JK", "BIPP.JK", "BKDP.JK", "BKSL.JK", "COCO.JK", "CPRI.JK", "CSIS.JK", "DUTI.JK", "ELTY.JK", "EMDE.JK", "FMII.JK", "GMTD.JK", "GPRA.JK", "GWSA.JK", "HDIT.JK", "INPP.JK", "ASSA.JK", "TMAS.JK", "GIAA.JK", "NELY.JK", "BLUE.JK", "PSSI.JK", "ELPI.JK", "HUMI.JK", "JAYA.JK", "SDMU.JK", "AKSI.JK", "BESS.JK", "BPTR.JK", "COAL.JK", "GTSI.JK", "HELI.JK", "HOPE.JK", "KAYU.JK", "MIRA.JK", "SAFE.JK", "SAPX.JK", "SHIP.JK", "TNCA.JK", "TRUK.JK", "AYLS.JK", "BNBR.JK", "NZIA.JK", "GSMF.JK", "RGAS.JK", "YPAS.JK", "TOOL.JK", "OILS.JK", "BAIK.JK", "ASPR.JK", "CGAS.JK", "EURO.JK", "AIMS.JK", "ASPI.JK", "BELL.JK", "ZYRX.JK", "BRMS.JK", "POLI.JK", "ARCI.JK", "HRTA.JK", "EMAS.JK", "RLCO.JK", "CUAN.JK", "CDIA.JK", "PTRO.JK", "BUVA.JK", "MINA.JK", "PADI.JK", "BRNA.JK", "AKPI.JK", "ESIP.JK", "IPOL.JK", "PACK.JK", "PBID.JK", "JARR.JK", "PGUN.JK", "UANG.JK", "FAST.JK", "PPRE.JK", "ALII.JK", "ERAL.JK", "DATA.JK", "DOOH.JK", "KIOS.JK", "PBRX.JK", "TRIS.JK", "NETV.JK", "INOV.JK", "PSAB.JK", "COIN.JK", "MDIA.JK", "BULL.JK", "SINI.JK", "UNIQ.JK", "ACRO.JK", "CBDK.JK", "ESTI.JK", "ERTX.JK", "OKAS.JK", "IFII.JK", "SOCI.JK", "PDPP.JK", "RATU.JK", "JGLE.JK", "PSKT.JK", "BBHI.JK", "KUAS.JK", "RMKO.JK", "CLAY.JK", "ENAK.JK", "VKTR.JK", "PART.JK", "UNSP.JK", "ZATA.JK", "AMMN.JK", "TKIM.JK", "KRAS.JK", "NICL.JK", "DKFT.JK", "FORE.JK", "FPNI.JK", "SOLA.JK", "SMBR.JK", "SMGA.JK", "WTON.JK", "DAAZ.JK", "CHEM.JK", "BSBK.JK", "DKHH.JK", "OPMS.JK", "SSMS.JK", "MINE.JK", "NICE.JK", "PPRI.JK", "NPGF.JK", "SRSN.JK", "CITA.JK", "UDNG.JK", "SMLE.JK", "DGWG.JK", "KAQI.JK", "CLPI.JK", "MDKI.JK", "BLES.JK", "IFSH.JK", "BATR.JK", "FWCT.JK", "GGRP.JK", "TBMS.JK", "INCF.JK", "SAMF.JK", "SWID.JK", "LTLS.JK", "OBMD.JK", "UNIC.JK", "SMKL.JK", "CMNT.JK", "KKES.JK", "YELO.JK", "AADI.JK", "CBRE.JK", "LEAD.JK", "BSSR.JK", "ATLA.JK", "FIRE.JK", "DSSA.JK", "BBRM.JK", "PSAT.JK", "MAHA.JK", "TPMA.JK", "BOAT.JK", "WINS.JK", "SICO.JK", "MBAP.JK", "BSML.JK", "MEJA.JK", "ITMA.JK", "DWGL.JK", "GTBO.JK", "ARII.JK", "MKAP.JK", "RIGS.JK", "CANI.JK", "PTIS.JK", "SUNI.JK", "GZCO.JK", "BWPT.JK", "ASHA.JK", "CPRO.JK", "WMUU.JK", "NASI.JK", "SIMP.JK", "SMAR.JK", "AYAM.JK", "DSFI.JK", "PTPS.JK", "NSSS.JK", "DEWI.JK", "ISEA.JK", "CMRY.JK", "ANJT.JK", "WAPO.JK", "JAWA.JK", "CSRA.JK", "DPUM.JK", "NEST.JK", "GULA.JK", "IBOS.JK", "STRK.JK", "TAYS.JK", "PSGO.JK", "BISI.JK", "ENZO.JK", "GRPM.JK", "NAYZ.JK", "YUPI.JK", "TLDN.JK", "MKTR.JK", "CRAB.JK", "FISH.JK", "BOBA.JK", "SUPA.JK", "BBKP.JK", "INPC.JK", "TRUE.JK", "MHKI.JK", "LAJU.JK"]
-list_saham = list(set(list_saham))
-
-# --- ENGINE ---
-st.title("⚡ Theta Turbo - High Speed Scanner")
-st.write(f"Status: **Scanning {len(list_saham)} Saham** | Update: {datetime.now(jakarta_tz).strftime('%H:%M:%S')} WIB")
-
-# JURUS ANTI RATE LIMIT: NYICIL DATA
+# ─────────────────────────────────────────────
+#  DATA FETCH — chunked buat hindari rate limit
+# ─────────────────────────────────────────────
 @st.cache_data(ttl=300)
-def fetch_data_secure(tickers):
+def fetch_intraday(tickers, chunk=25):
     all_dfs = {}
-    chunk_size = 20
-    p_bar = st.progress(0)
-    
-    for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i:i + chunk_size]
+    for i in range(0, len(tickers), chunk):
+        batch = tickers[i:i+chunk]
         try:
-            data = yf.download(chunk, period="10d", interval="15m", group_by='ticker', progress=False, threads=True)
-            for t in chunk:
-                if t in data.columns.get_level_values(0):
-                    df_single = data[t].dropna()
-                    if not df_single.empty:
-                        all_dfs[t] = df_single
+            raw = yf.download(
+                batch, period="5d", interval="15m",
+                group_by='ticker', progress=False,
+                threads=True, auto_adjust=True
+            )
+            for t in batch:
+                try:
+                    df = raw[t].dropna() if len(batch)>1 else raw.dropna()
+                    if len(df) >= 50:
+                        all_dfs[t] = df
+                except: pass
         except: pass
-        
-        p_bar.progress(min((i + chunk_size) / len(tickers), 1.0))
-        time.sleep(0.3) # Jeda nafas buat Yahoo
-    
-    p_bar.empty()
+        time.sleep(0.5)  # napas biar ga di-ban
     return all_dfs
 
-data_dict = fetch_data_secure(list_saham)
+# ─────────────────────────────────────────────
+#  MAIN SCAN
+# ─────────────────────────────────────────────
+prog_ph = st.empty()
+with prog_ph.container():
+    st.markdown('<div style="color:#ff7b00;font-family:Space Mono,monospace;font-size:12px;letter-spacing:1px;">🔥 Scanning intraday 15M data...</div>', unsafe_allow_html=True)
+    pb = st.progress(0)
 
-if data_dict:
-    results = []
-    for ticker, df in data_dict.items():
+try:
+    data_dict = fetch_intraday(stocks_yf)
+    results   = []
+    tickers   = list(data_dict.keys())
+
+    for i, ticker_yf in enumerate(tickers):
+        pb.progress((i+1)/max(len(tickers),1))
         try:
-            if len(df) < 50: continue
-            df = calculate_indicators(df)
-            last = df.iloc[-1]
-            prev = df.iloc[-2]
+            df = data_dict[ticker_yf].copy()
+            if len(df) < 55: continue
 
-            score = 0
-            if last['RSI'] > last['RSI_EMA'] and prev['RSI'] <= prev['RSI_EMA']: score += 1
-            if last['MACDH'] > 0 and last['MACDH'] > prev['MACDH']: score += 1
-            if last['Close'] > last['EMA20'] > last['EMA50']: score += 1
-            if last['Volume'] > (last['Vol_Avg'] * vol_threshold): score += 1
+            df = apply_intraday_indicators(df)
+            r  = df.iloc[-1]; p = df.iloc[-2]
+            p2 = df.iloc[-3] if len(df)>=3 else p
 
-            if score >= min_score_filter:
-                v_ratio = last['Volume']/last['Vol_Avg']
-                results.append({
-                    "Symbol": ticker.replace(".JK", ""),
-                    "Price": int(last['Close']),
-                    "Score": f"{score}/4",
-                    "Status": "🚀 GACOR" if score == 4 else "🔥 POTENSIAL",
-                    "RSI": round(last['RSI'], 2),
-                    "V-Ratio": f"{v_ratio:.2f}x",
-                    "EMA_Trend": "Bullish" if last['Close'] > last['EMA100'] else "Retrace"
-                })
+            close    = float(r['Close'])
+            vol      = float(r['Volume'])
+            turnover = close * vol
+            rvol     = float(r['RVOL'])
 
-                if score == 4 and tele_notif:
-                    msg = (f"⚡ *THETA SIGNAL: {ticker}* ⚡\nPrice: `{int(last['Close'])}` | Score: *4/4*")
-                    send_telegram(msg)
-        except: continue
+            if turnover < min_turn: continue
+            if rvol < vol_thresh:   continue
 
-    if results:
-        res_df = pd.DataFrame(results).sort_values("Score", ascending=False)
-        st.dataframe(res_df, width=1500) # Ganti ke width fix biar gak error warning
+            # Pilih scoring sesuai mode
+            if scan_mode == "Scalping ⚡":
+                sc, reasons, det = score_scalping(r, p, p2)
+            elif scan_mode == "Momentum 🚀":
+                sc, reasons, det = score_momentum(r, p, p2)
+            else:
+                sc, reasons, det = score_reversal(r, p, p2)
+
+            if sc < min_score: continue
+
+            sig = get_signal(sc, scan_mode)
+            if sig == "WAIT": continue
+
+            # TP / SL (berbasis ATR intraday)
+            tr_arr  = pd.concat([
+                df['High']-df['Low'],
+                (df['High']-df['Close'].shift()).abs(),
+                (df['Low']-df['Close'].shift()).abs()
+            ], axis=1).max(axis=1)
+            atr     = float(tr_arr.rolling(14).mean().iloc[-1])
+
+            if scan_mode == "Scalping ⚡":
+                tp = close + 1.5*atr; sl = close - 0.8*atr
+            elif scan_mode == "Momentum 🚀":
+                tp = close + 2.0*atr; sl = close - 1.0*atr
+            else:  # Reversal
+                tp = close + 2.5*atr; sl = close - 0.8*atr
+
+            rr = (tp-close)/max(close-sl, 0.01)
+
+            # Trend
+            e9=float(r['EMA9']); e21=float(r['EMA21']); e50=float(r['EMA50'])
+            trend = "▲ UP" if e9>e21>e50 else ("▼ DOWN" if e9<e21<e50 else "◆ SIDE")
+            roc3  = float(r['ROC3'])*100
+
+            results.append({
+                "Ticker":    stock_map[ticker_yf],
+                "Price":     int(close),
+                "Score":     sc,
+                "Signal":    sig,
+                "Trend":     trend,
+                "RSI-EMA":   round(float(r['RSI_EMA']),1),
+                "Stoch K":   round(float(r['STOCH_K']),1),
+                "Stoch D":   round(float(r['STOCH_D']),1),
+                "MACD Hist": round(float(r['MACD_Hist']),4),
+                "RVOL":      round(rvol,2),
+                "BB%":       round(float(r['BB_pct']),2),
+                "ROC 3B%":   round(roc3,2),
+                "VWAP":      int(float(r['VWAP'])),
+                "TP":        int(tp),
+                "SL":        int(sl),
+                "R:R":       round(rr,1),
+                "Turnover(M)": round(turnover/1e6,1),
+                "Reasons":   " · ".join(reasons),
+                "_class":    get_card_class(sig),
+            })
+        except Exception: continue
+
+    prog_ph.empty()
+
+    # ─────────────────────────────────────────
+    #  DISPLAY
+    # ─────────────────────────────────────────
+    if not results:
+        st.markdown("""
+        <div style="text-align:center;padding:60px;color:#4a5568;font-family:Space Mono,monospace;">
+          <div style="font-size:36px;margin-bottom:12px;">📭</div>
+          <div style="font-size:13px;letter-spacing:2px;">BELUM ADA SIGNAL VALID</div>
+          <div style="font-size:11px;margin-top:8px;">Turunkan Min Score atau Min RVOL</div>
+        </div>""", unsafe_allow_html=True)
     else:
-        st.warning("Belum ada signal valid. Standby Bro...")
+        df_out  = pd.DataFrame(results).sort_values("Score", ascending=False).reset_index(drop=True)
+        gacor   = df_out[df_out["Signal"].str.contains("GACOR|REVERSAL", na=False)]
+        potensi = df_out[df_out["Signal"].str.contains("POTENSIAL", na=False)]
+        avg_rsi = df_out['RSI-EMA'].mean()
 
-# --- AUTO REFRESH ---
-st.divider()
-st.caption(f"Last Scan: {datetime.now(jakarta_tz).strftime('%H:%M:%S')} WIB | Refresh: 300s")
-time.sleep(300) # Refresh tiap 5 menit biar aman dari ban
+        # Metrics
+        st.markdown(f"""
+        <div class="metric-row">
+          <div class="metric-card orange"><div class="metric-label">Mode</div>
+            <div class="metric-value" style="font-size:13px;margin-top:4px;">{scan_mode}</div></div>
+          <div class="metric-card green"><div class="metric-label">Signal Lolos</div>
+            <div class="metric-value">{len(df_out)}</div>
+            <div class="metric-sub">dari {len(raw_stocks)} emiten</div></div>
+          <div class="metric-card red"><div class="metric-label">GACOR 🔥</div>
+            <div class="metric-value">{len(gacor)}</div>
+            <div class="metric-sub">score ≥ 5</div></div>
+          <div class="metric-card amber"><div class="metric-label">POTENSIAL</div>
+            <div class="metric-value">{len(potensi)}</div>
+            <div class="metric-sub">score = 4</div></div>
+          <div class="metric-card"><div class="metric-label">Avg RSI-EMA</div>
+            <div class="metric-value" style="color:{'#00ff88' if avg_rsi>50 else '#ffb700' if avg_rsi>35 else '#ff3d5a'}">{avg_rsi:.1f}</div>
+            <div class="metric-sub">{'Bullish' if avg_rsi>50 else 'Neutral' if avg_rsi>35 else 'Oversold'}</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Ticker tape
+        th = '<div class="tape-wrap"><div class="tape-inner">'
+        for _, row in df_out.iterrows():
+            roc=row['ROC 3B%']; cls='up' if roc>0 else('down' if roc<0 else'flat')
+            sym='▲' if roc>0 else('▼' if roc<0 else'─')
+            th += f'<span class="tape-item {cls}">{row["Ticker"]} {int(row["Price"])} {sym}{abs(roc):.1f}% [{row["Signal"]}]</span>'
+        th += th.replace('tape-inner">',''); th += '</div></div>'
+        st.markdown(th, unsafe_allow_html=True)
+
+        # Alert GACOR
+        if not gacor.empty:
+            st.markdown(f"""
+            <div class="alert-box">
+              <div class="alert-title">🚨 GACOR ALERT · {len(gacor)} SAHAM · {scan_mode}</div>
+              <div style="font-size:11px;color:#4a5568;margin-top:4px;">
+                Score ≥ 5 · Konfirmasi multi-indikator 15M · R:R optimal
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+        # Telegram alert
+        if tele_on and results:
+            if 'tt_last_sent' not in st.session_state: st.session_state.tt_last_sent=set()
+            cur_set = set(df_out['Ticker'].tolist())
+            new_alr = cur_set - st.session_state.tt_last_sent
+
+            if new_alr:
+                top_new = df_out[df_out['Ticker'].isin(new_alr)].head(5).to_dict('records')
+                if top_new:
+                    send_telegram_alert(top_new)
+
+                # Extra alert untuk score = 6
+                perfect = df_out[(df_out['Ticker'].isin(new_alr)) & (df_out['Score']==6)]
+                for _, rw in perfect.iterrows():
+                    send_telegram_gacor(rw.to_dict())
+
+                st.session_state.tt_last_sent.update(new_alr)
+            st.session_state.tt_last_sent = st.session_state.tt_last_sent & cur_set
+
+        # CARD VIEW
+        if view_mode == "Card View 🃏":
+            st.markdown('<div class="section-title">Signal Cards</div>', unsafe_allow_html=True)
+            card_html = '<div class="signal-grid">'
+            for _, row in df_out.head(20).iterrows():
+                sc_int  = int(row['Score'])
+                bars    = ''.join([
+                    f'<div class="sc-bar {"filled" if i < sc_int else "empty"}" style="width:28px"></div>'
+                    for i in range(6)
+                ])
+                roc_c   = '#00ff88' if row['ROC 3B%']>0 else '#ff3d5a'
+                price_c = '#00ff88' if row['ROC 3B%']>0 else '#ff3d5a'
+                trend_e = "📈" if "▲" in row['Trend'] else ("📉" if "▼" in row['Trend'] else "➡️")
+
+                card_html += f"""
+                <div class="signal-card {row['_class']}">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                    <div>
+                      <div class="sc-ticker">{row['Ticker']}</div>
+                      <div class="sc-price" style="color:{price_c}">{int(row['Price']):,} {trend_e}</div>
+                    </div>
+                    <div style="text-align:right;">
+                      <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">SCORE</div>
+                      <div style="font-family:Space Mono,monospace;font-size:20px;font-weight:700;color:{'#00ff88' if sc_int>=5 else '#ffb700' if sc_int>=4 else '#00e5ff'}">{row['Score']}</div>
+                    </div>
+                  </div>
+                  <div class="sc-signal" style="color:{'#00ff88' if 'GACOR' in row['Signal'] or 'REVERSAL' in row['Signal'] else '#ffb700' if 'POTENSIAL' in row['Signal'] else '#00e5ff'}">{row['Signal']}</div>
+                  <div class="sc-bars">{bars}</div>
+                  <div class="sc-stats">
+                    <div class="sc-stat">RSI-EMA <span>{row['RSI-EMA']}</span></div>
+                    <div class="sc-stat">STOCH <span>{row['Stoch K']:.0f}</span></div>
+                    <div class="sc-stat">RVOL <span>{row['RVOL']}x</span></div>
+                    <div class="sc-stat">ROC <span style="color:{roc_c}">{row['ROC 3B%']:+.1f}%</span></div>
+                  </div>
+                  <div class="sc-stats" style="margin-top:6px;">
+                    <div class="sc-stat">TP <span style="color:#00ff88">{int(row['TP']):,}</span></div>
+                    <div class="sc-stat">SL <span style="color:#ff3d5a">{int(row['SL']):,}</span></div>
+                    <div class="sc-stat">R:R <span>{row['R:R']}</span></div>
+                  </div>
+                  <div style="margin-top:8px;font-size:10px;color:#4a5568;line-height:1.4;font-family:Space Mono,monospace;">{row['Reasons'][:70]}</div>
+                </div>"""
+            card_html += '</div>'
+            st.markdown(card_html, unsafe_allow_html=True)
+
+        # TABLE VIEW
+        st.markdown('<div class="section-title">Full Signal Table</div>', unsafe_allow_html=True)
+        display_cols = ["Ticker","Price","Score","Signal","Trend","RSI-EMA","Stoch K","Stoch D",
+                        "MACD Hist","RVOL","BB%","ROC 3B%","VWAP","TP","SL","R:R","Turnover(M)","Reasons"]
+        st.dataframe(
+            df_out[display_cols], width='stretch', hide_index=True,
+            column_config={
+                "Score":      st.column_config.ProgressColumn("Score", min_value=0, max_value=6, format="%.1f"),
+                "RSI-EMA":    st.column_config.NumberColumn("RSI-EMA", format="%.1f"),
+                "Stoch K":    st.column_config.NumberColumn("Stoch K", format="%.1f"),
+                "RVOL":       st.column_config.NumberColumn("RVOL", format="%.1fx"),
+                "ROC 3B%":    st.column_config.NumberColumn("ROC 3B%", format="%.2f%%"),
+                "Turnover(M)":st.column_config.NumberColumn("Turnover(M)", format="Rp%.0fM"),
+            }
+        )
+
+except Exception as e:
+    st.markdown(f"""
+    <div style="background:rgba(255,61,90,.1);border:1px solid #ff3d5a;border-radius:8px;padding:20px;font-family:Space Mono,monospace;">
+      <div style="color:#ff3d5a;font-weight:700;">⚠️ ERROR</div>
+      <div style="color:#c9d1d9;font-size:12px;margin-top:8px;">{str(e)}</div>
+    </div>""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+#  FOOTER
+# ─────────────────────────────────────────────
+st.markdown(f"""
+<div style="margin-top:28px;padding-top:14px;border-top:1px solid #1c2533;
+     display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+  <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">
+    🔥 Theta Turbo v4.0 · Intraday 15M Scanner · Built for Speed
+  </div>
+  <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">
+    <span style="color:#ff7b00">{datetime.now(jakarta_tz).strftime('%H:%M:%S')} WIB</span>
+    · Next refresh 300s
+  </div>
+</div>""", unsafe_allow_html=True)
+
+time.sleep(300)
 st.rerun()
