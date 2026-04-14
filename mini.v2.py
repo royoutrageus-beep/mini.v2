@@ -600,7 +600,7 @@ with tab_scanner:
                 vol_thresh = rcfg["min_rvol"]
                 st.caption(f"Auto: Score≥{min_score} · RVOL≥{vol_thresh}x")
             else:
-                min_score  = st.slider("Min Score (0-6)", 0, 6, 4, key="msc")
+                min_score  = st.slider("Min Score (0-6)", 0, 6, 4, key="slider_min_score_filter")
                 vol_thresh = st.slider("Min RVOL Spike", 1.0, 5.0, 1.5, 0.1, key="vol")
             min_turn = st.number_input("Min Turnover (M Rp)", value=500, step=100, key="min_turnover_input") * 1_000_000
         with sc3:
