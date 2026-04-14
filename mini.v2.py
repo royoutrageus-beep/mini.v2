@@ -605,7 +605,7 @@ with tab_scanner:
             min_turn = st.number_input("Min Turnover (M Rp)", value=500, step=100, key="min_turnover_input") * 1_000_000
         with sc3:
             st.markdown('<div class="settings-label">TAMPILAN</div>', unsafe_allow_html=True)
-            view_mode = st.radio("View", ["Card View 🃏","Table View 📊"], label_visibility="collapsed")
+            view_mode = st.radio("View", ["Card View 🃏","Table View 📊"], label_visibility="collapsed", key="view_mode_main")
             st.caption("🔄 Auto-refresh tiap 300 detik")
             st.caption(f"📊 {len(raw_stocks)} emiten dipantau")
             st.caption(f"🎯 Regime: {regime} · Mode: {scan_mode}")
