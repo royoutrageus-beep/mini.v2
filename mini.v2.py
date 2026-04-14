@@ -529,6 +529,71 @@ def fetch_intraday(tickers_yf, chunk=25):
             st.session_state.data_source = f"yFinance (Sisa quota: {remaining}) 🔴"
     return fetch_intraday_yf(tickers_yf, chunk)
 
+# --- TEMPEL DI PALING BAWAH FILE ---
+
+def main():
+    # 1. Ambil kondisi Market
+    regime, ihsg_p, e20, e55, detail, ihsg_chg = get_market_regime()
+    reg_cfg = get_regime_config(regime)
+
+    # 2. Dashboard Header & Metrics
+    st.markdown('<div class="section-title">MARKET MONITOR</div>', unsafe_allow_html=True)
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        color = reg_cfg['color']
+        st.markdown(f'<div class="metric-card" style="border-top:3px solid {color}"><div class="metric-label">REGIME</div><div class="metric-value" style="color:{color}">{regime}</div><div class="metric-sub">{detail}</div></div>', unsafe_allow_html=True)
+    with m2:
+        st.markdown(f'<div class="metric-card"><div class="metric-label">IHSG</div><div class="metric-value">{ihsg_p:,.0f}</div><div class="metric-sub">{"🟢" if ihsg_chg > 0 else "🔴"} {ihsg_chg:.2f}%</div></div>', unsafe_allow_html=True)
+    with m3:
+        st.markdown(f'<div class="metric-card"><div class="metric-label">DATA SOURCE</div><div class="metric-value" style="font-size:16px">{st.session_state.data_source}</div><div class="metric-sub">Quota: {st.session_state.ds_calls_today}/{DS_DAILY_QUOTA}</div></div>', unsafe_allow_html=True)
+
+    # 3. Tombol Scan
+    st.write("")
+    if st.button("🚀 MULAI SCANNING SEKARANG", type="primary", use_container_width=True):
+        with st.spinner("Menganalisis pergerakan bandar & teknikal..."):
+            # Analisis semua stock (raw_stocks dari list di atas)
+            results = analyze_watchlist(raw_stocks, mode=scan_mode)
+            
+            df_res = pd.DataFrame(results)
+            # Filter berdasarkan input slider/setting
+            df_filtered = df_res[
+                (df_res['Score'] >= min_score) & 
+                (df_res['RVOL'] >= vol_thresh)
+            ].sort_values(by="Score", ascending=False)
+
+            if not df_filtered.empty:
+                st.markdown(f'<div class="section-title">FOUND {len(df_filtered)} SIGNALS</div>', unsafe_allow_html=True)
+                
+                if view_mode == "Card View 🃏":
+                    for i in range(0, len(df_filtered), 3):
+                        cols = st.columns(3)
+                        batch = df_filtered.iloc[i:i+3]
+                        for idx, (idx_row, row) in enumerate(batch.iterrows()):
+                            with cols[idx]:
+                                st.markdown(f"""
+                                    <div class="signal-card {row['_class']}">
+                                        <div class="sc-ticker">{row['Ticker']} <span style="font-size:10px;color:gray">{row['Trend']}</span></div>
+                                        <div class="sc-price">Rp {row['Price']:,} | Vol: {row['RVOL']}x</div>
+                                        <div class="sc-signal">{row['Signal']}</div>
+                                        <div class="sc-stats">
+                                            <div class="sc-stat">Score: <span>{row['Score']}/6</span></div>
+                                            <div class="sc-stat">RSI-E: <span>{row['RSI-EMA']}</span></div>
+                                        </div>
+                                        <div style="font-size:10px; color:#4a5568; margin-top:8px;">{row['Reasons']}</div>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                else:
+                    st.dataframe(df_filtered.drop(columns=['_class']), use_container_width=True)
+                
+                if tele_on:
+                    send_telegram_alert(df_filtered.to_dict('records'))
+            else:
+                st.info("Belum ada signal yang masuk kriteria. Coba turunkan filter atau tunggu market bergerak.")
+
+# WAJIB: Baris terakhir untuk running aplikasinya
+if __name__ == "__main__":
+    main()
+
 # ── MARKET REGIME + TABS ──
 regime_data = get_market_regime()
 regime, ihsg_price, ema20, ema55, regime_detail = regime_data[0], regime_data[1], regime_data[2], regime_data[3], regime_data[4]
