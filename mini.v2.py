@@ -591,7 +591,7 @@ with tab_scanner:
                 st.markdown(f'<div style="font-family:Space Mono,monospace;font-size:10px;padding:6px 10px;background:rgba(0,0,0,.3);border-radius:4px;color:{rcfg["color"]};">Auto: {scan_mode}</div>', unsafe_allow_html=True)
             else:
                 scan_mode = st.radio("Mode Manual", ["Scalping ⚡","Momentum 🚀","Reversal 🎯"], label_visibility="collapsed")
-            tele_on = st.toggle("📡 Telegram Alert", value=True)
+            tele_on = st.toggle("📡 Telegram Alert", value=True, key="unique_tele_alert_toggle")
         with sc2:
             st.markdown('<div class="settings-label">FILTER</div>', unsafe_allow_html=True)
             auto_thresh = st.toggle("🤖 Auto-Threshold", value=True, key="auto_thr")
