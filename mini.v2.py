@@ -7,30 +7,22 @@ import numpy as np
 import pytz
 from datetime import datetime
 
-if 'ds_calls_today' not in st.session_state:
-    st.session_state.ds_calls_today = 0
-
 # ════════════════════════════════════════════════════
-#  THETA TURBO v5 — DATASECTORS EDITION
-#  Secrets: DATASECTORS_API_KEY, DS_DAILY_QUOTA,
-#           TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+#  THETA TURBO v5 — YFINANCE EDITION
+#  Secrets: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 # ════════════════════════════════════════════════════
-DATASECTORS_API_KEY = st.secrets["DATASECTORS_API_KEY"]
-DS_DAILY_QUOTA      = int(st.secrets.get("DS_DAILY_QUOTA", 5000))
-TOKEN               = st.secrets.get("TELEGRAM_TOKEN", "")
-CHAT_ID             = st.secrets.get("TELEGRAM_CHAT_ID", "")
+TOKEN   = st.secrets.get("TELEGRAM_TOKEN", "")
+CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
 # ════════════════════════════════════════════════════
 
 jakarta_tz = pytz.timezone("Asia/Jakarta")
-DS_BASE    = "https://api.datasectors.com/api"
-DS_HEADERS = {"X-API-Key": DATASECTORS_API_KEY, "Content-Type": "application/json"}
 
 for _k,_v in [("scan_results",[]),("last_scan_time",None),("data_dict",{}),
                ("wl_results",[]),("wl_mode_used",""),("tt_last_sent",set()),
                ("last_scan_mode","Scalping ⚡")]:
     if _k not in st.session_state: st.session_state[_k] = _v
 
-st.set_page_config(layout="wide", page_title="Theta Turbo — DataSectors", page_icon="🔥",
+st.set_page_config(layout="wide", page_title="Theta Turbo — yFinance", page_icon="🔥",
                    initial_sidebar_state="collapsed")
 
 st.markdown("""
@@ -326,41 +318,38 @@ def send_telegram_alert(results_top, source="Scanner", mode=""):
     except: pass
 
 # ════════════════════════════════════════════════════
-#  DATA ENGINE — DATASECTORS
+#  DATA ENGINE — YFINANCE
 # ════════════════════════════════════════════════════
 @st.cache_data(ttl=900)
-def fetch_ohlcv_ds_cached(ticker, interval="15m", limit=120):
-    try:
-        r = requests.post(f"{DS_BASE}/chart/ohlcv",
-            json={"symbol": ticker, "interval": interval, "limit": limit},
-            headers=DS_HEADERS, timeout=10)
-        if r.status_code != 200: return None
-        d = r.json()
-        if not d.get("success"): return None
-        rows = d.get("data", [])
-        if not rows: return None
-        df = pd.DataFrame(rows)
-        df.columns = [c.title() for c in df.columns]
-        if "Timestamp" in df.columns:
-            df["Datetime"] = pd.to_datetime(df["Timestamp"], unit="s", errors="coerce")
-            df = df.set_index("Datetime")
-        for col in ["Open","High","Low","Close","Volume"]:
-            if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.dropna(subset=["Close"])
-        return df if len(df) >= 20 else None
-    except: return None
-
-def fetch_intraday(tickers_yf):
+def fetch_intraday_cached(tickers_tuple, chunk=25):
+    tickers = list(tickers_tuple)
     all_dfs = {}
-    for t in [x.replace(".JK","") for x in tickers_yf]:
-        df = fetch_ohlcv_ds_cached(t, "15m", 120)
-        if df is not None and len(df) >= 50:
-            all_dfs[t + ".JK"] = df
-        time.sleep(0.05)
+    for i in range(0, len(tickers), chunk):
+        batch = tickers[i:i+chunk]
+        try:
+            raw = yf.download(batch, period="5d", interval="15m",
+                              group_by="ticker", progress=False,
+                              threads=False, auto_adjust=True, timeout=20)
+            for t in batch:
+                try:
+                    if len(batch) > 1:
+                        df = raw[t].dropna()
+                    else:
+                        df = raw.copy()
+                        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+                        df = df.dropna()
+                    if len(df) >= 50: all_dfs[t] = df
+                except: pass
+        except Exception as ex:
+            if "Rate" in str(ex) or "429" in str(ex): time.sleep(5)
+        time.sleep(0.4)
     return all_dfs
 
-DATA_SOURCE_LABEL = "DataSectors ⚡"
-DATA_SOURCE_COLOR = "#2dd4bf"
+def fetch_intraday(tickers_yf):
+    return fetch_intraday_cached(tuple(tickers_yf))
+
+DATA_SOURCE_LABEL = "yFinance ☕"
+DATA_SOURCE_COLOR = "#ffb700"
 
 # ════════════════════════════════════════════════════
 #  MARKET REGIME DETECTOR
@@ -409,7 +398,15 @@ def analyze_watchlist(tickers_raw, mode="Reversal 🎯"):
     for t in tickers_raw:
         t = t.strip().upper()
         if not t: continue
-        df = fetch_ohlcv_ds_cached(t, "15m", 150)
+        df = None
+        try:
+            raw = yf.download(t+".JK", period="5d", interval="15m",
+                              progress=False, auto_adjust=True, threads=False)
+            if not raw.empty:
+                if isinstance(raw.columns, pd.MultiIndex): raw.columns = raw.columns.droplevel(1)
+                df = raw.dropna()
+                if len(df) < 10: df = None
+        except: pass
         if df is None or len(df) < 55:
             results.append({"Ticker":t,"Price":0,"Score":0,"Signal":"No data",
                 "RSI-EMA":0,"Stoch K":0,"RVOL":0,"BB%":0,"Trend":"-",
@@ -442,7 +439,7 @@ st.markdown(f"""
 <div class="tt-header">
   <div>
     <div class="tt-logo">🔥 THETA TURBO</div>
-    <div class="tt-sub">Intraday 15M · DataSectors Edition · Auto-15M</div>
+    <div class="tt-sub">Intraday 15M · yFinance Edition · Auto-15M</div>
   </div>
   <div class="live-badge"><div class="live-dot"></div>LIVE {now_jkt.strftime("%H:%M:%S")} WIB</div>
 </div>
