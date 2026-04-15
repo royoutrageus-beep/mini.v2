@@ -293,27 +293,49 @@ def get_card_class(signal):
 # ════════════════════════════════════════════════════
 #  TELEGRAM
 # ════════════════════════════════════════════════════
-def send_telegram_alert(results_top):
+def send_telegram_alert(results_top, source="Scanner", mode=""):
+    """Kirim alert detail ke Telegram. Satu pesan, semua info."""
     if not TOKEN or not CHAT_ID: return
-    now=datetime.now(jakarta_tz); is_open=9<=now.hour<16
-    hdr=f"{"🔴 MARKET OPEN" if is_open else "🌙 AFTER HOURS"}\n🔥 *THETA TURBO ALERT*\n⏰ `{now.strftime("%H:%M:%S")} WIB`\n{"━"*28}\n"
-    body=""
-    for r in results_top[:5]:
-        sig=r["Signal"]; em="🏆" if "GACOR" in sig else("🔥" if "POTENSIAL" in sig else "👀")
-        te="📈" if "▲" in r.get("Trend","") else("📉" if "▼" in r.get("Trend","") else "➡️")
-        bar="█"*int(r["Score"])+"░"*(6-int(r["Score"]))
-        body+=f"\n{em} *{r["Ticker"]}*  `{sig}`\n   💰 Price: `{r["Price"]:,}` {te}\n   📊 Score: `[{bar}] {r["Score"]}/6`\n   🎯 TP: `{r["TP"]:,}` | 🛑 SL: `{r["SL"]:,}` | R:R `{r["R:R"]}`\n"
-    footer=f"\n{"━"*28}\n⚡ _Theta Turbo v5 · 15M_\n⚠️ _BUKAN saran investasi!_"
-    try: requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id":CHAT_ID,"text":hdr+body+footer,"parse_mode":"Markdown"},timeout=10)
-    except: pass
+    now = datetime.now(jakarta_tz)
+    is_open = 9 <= now.hour < 16
+    sep = "━" * 28
 
-def send_telegram_gacor(row):
-    if not TOKEN or not CHAT_ID: return
-    now=datetime.now(jakarta_tz)
-    msg=f"🚨🚨 *SCORE PENUH — {row["Ticker"]}* 🚨🚨\n{"━"*28}\n💰 Price: `{row["Price"]:,}`\n📊 Score: `[██████] 6/6`\n🎯 TP: `{row["TP"]:,}` | 🛑 SL: `{row["SL"]:,}` | R:R `{row["R:R"]}`\n⏰ `{now.strftime("%H:%M:%S")} WIB`"
-    try: requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"Markdown"},timeout=10)
+    header = (
+        f"{'🔴 MARKET OPEN' if is_open else '🌙 AFTER HOURS'}\n"
+        f"🔥 *THETA TURBO {'WATCHLIST' if source=='Watchlist' else 'ALERT'}*\n"
+        f"⏰ `{now.strftime('%H:%M:%S')} WIB` · `{now.strftime('%d %b %Y')}`\n"
+        f"{sep}\n"
+    )
+
+    body = ""
+    for r in results_top[:5]:
+        sig  = r.get("Signal", "-")
+        em   = "🏆" if ("GACOR" in sig or "REVERSAL" in sig) else ("🔥" if "POTENSIAL" in sig else "👀")
+        te   = "📈" if "▲" in r.get("Trend","") else ("📉" if "▼" in r.get("Trend","") else "➡️")
+        bar  = "█" * int(r["Score"]) + "░" * (6 - int(r["Score"]))
+        rsn  = r.get("Reasons","")[:60]
+        body += (
+            f"\n{em} *{r['Ticker']}*  `{sig}`\n"
+            f"   💰 Price: `{r['Price']:,}` {te}\n"
+            f"   📊 Score: `[{bar}] {r['Score']}/6`\n"
+            f"   📈 RSI-EMA: `{r.get('RSI-EMA',0)}` | STOCH: `{r.get('Stoch K',0)}`\n"
+            f"   🌊 RVOL: `{r.get('RVOL',0)}x` | MACD: `{r.get('MACD Hist',0)}`\n"
+            f"   🎯 TP: `{r['TP']:,}` | 🛑 SL: `{r['SL']:,}` | R:R `{r['R:R']}`\n"
+            f"   💡 _{rsn}_\n"
+        )
+
+    footer = (
+        f"\n{sep}\n"
+        f"⚡ _Theta Turbo v5 · 15M Intraday_\n"
+        f"⚠️ _BUKAN saran investasi. DYOR!_"
+    )
+
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": header+body+footer, "parse_mode": "Markdown"},
+            timeout=10
+        )
     except: pass
 
 # ════════════════════════════════════════════════════
@@ -772,6 +794,7 @@ with tab_watchlist:
         st.markdown("<br>", unsafe_allow_html=True)
         wl_run=st.button("🔍 Analisa", use_container_width=True, key="wl_run")
         wl_share=st.button("📋 Copy Hasil", use_container_width=True, key="wl_share")
+        wl_tele=st.button("📡 Kirim Telegram", use_container_width=True, key="wl_tele")
         st.caption(f"DS calls: {st.session_state.ds_calls_today}/{DS_DAILY_QUOTA}")
 
     if wl_run and wl_input.strip():
@@ -783,6 +806,13 @@ with tab_watchlist:
                 wl_results=analyze_watchlist(raw_wl, mode=wl_mode)
             st.session_state.wl_results=wl_results
             st.session_state.wl_mode_used=wl_mode
+            # Auto-kirim ke Telegram kalau ada signal
+            wl_gacor=[r for r in wl_results if r["Price"]>0 and ("GACOR" in r.get("Signal","") or "REVERSAL" in r.get("Signal",""))]
+            wl_pot=[r for r in wl_results if r["Price"]>0 and "POTENSIAL" in r.get("Signal","")]
+            wl_to_send = wl_gacor + wl_pot
+            if wl_to_send:
+                send_telegram_alert(wl_to_send[:5], source="Watchlist", mode=wl_mode)
+                st.success(f"📡 Alert terkirim ke Telegram: {len(wl_to_send)} signal")
             ok_res=[r for r in wl_results if r["Score"]>0]
             gacor_wl=[r for r in ok_res if "GACOR" in r.get("Signal","") or "REVERSAL" in r.get("Signal","")]
             pot_wl=[r for r in ok_res if "POTENSIAL" in r.get("Signal","")]
@@ -839,6 +869,15 @@ with tab_watchlist:
                     "RVOL":st.column_config.NumberColumn("RVOL",format="%.2fx"),
                     "ROC 3B%":st.column_config.NumberColumn("ROC 3B%",format="%.2f%%"),
                 })
+
+    if wl_tele and "wl_results" in st.session_state and st.session_state.wl_results:
+        to_send = [r for r in st.session_state.wl_results if r["Price"]>0]
+        if to_send:
+            send_telegram_alert(to_send[:5], source="Watchlist",
+                                mode=st.session_state.get("wl_mode_used",""))
+            st.success(f"📡 Terkirim ke Telegram: {min(5,len(to_send))} teratas!")
+        else:
+            st.warning("Tidak ada data untuk dikirim.")
 
     elif wl_share and "wl_results" in st.session_state and st.session_state.wl_results:
         now_str=datetime.now(jakarta_tz).strftime("%d %b %Y %H:%M")
