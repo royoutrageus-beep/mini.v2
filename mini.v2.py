@@ -455,17 +455,11 @@ chg_col="#00ff88" if ihsg_chg>=0 else "#ff3d5a"
 chg_sym="▲" if ihsg_chg>=0 else "▼"
 
 # ── STATUS BAR ──
-quota_pct=(st.session_state.ds_calls_today/DS_DAILY_QUOTA*100) if DS_DAILY_QUOTA>0 else 0
-qcol="#00ff88" if quota_pct<60 else("#ffb700" if quota_pct<85 else "#ff3d5a")
 st.markdown(f"""
 <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
   <div style="font-family:Space Mono,monospace;font-size:10px;padding:4px 12px;border-radius:20px;
-       background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.2);color:#00e5ff;">
-    📡 {st.session_state.data_source}
-  </div>
-  <div style="font-family:Space Mono,monospace;font-size:10px;padding:4px 12px;border-radius:20px;
-       background:rgba(0,0,0,.3);border:1px solid #1c2533;color:{qcol};">
-    DataSectors: {st.session_state.ds_calls_today}/{DS_DAILY_QUOTA} calls ({quota_pct:.1f}%)
+       background:rgba(255,183,0,.08);border:1px solid rgba(255,183,0,.3);color:#ffb700;">
+    ☕ yFinance
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -713,7 +707,7 @@ with tab_watchlist:
         wl_run=st.button("🔍 Analisa", use_container_width=True, key="wl_run")
         wl_share=st.button("📋 Copy Hasil", use_container_width=True, key="wl_share")
         wl_tele=st.button("📡 Kirim Telegram", use_container_width=True, key="wl_tele")
-        st.caption(f"DS calls: {st.session_state.ds_calls_today}/{DS_DAILY_QUOTA}")
+        st.caption("yFinance Active")
 
     if wl_run and wl_input.strip():
         raw_wl=list(dict.fromkeys([t.strip().upper() for line in wl_input.split("\n") for t in line.split(",") if t.strip()]))
