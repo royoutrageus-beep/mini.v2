@@ -350,17 +350,26 @@ def fetch_intraday_yf_cached(tickers_tuple, chunk=25):
     tickers = list(tickers_tuple)
     all_dfs = {}
     for i in range(0, len(tickers), chunk):
-        batch=tickers[i:i+chunk]
+        batch = tickers[i:i+chunk]
         try:
-            raw=yf.download(batch, period="5d", interval="15m",
-                            group_by="ticker", progress=False, threads=True, auto_adjust=True)
+            raw = yf.download(
+                batch, period="5d", interval="15m",
+                group_by="ticker", progress=False,
+                threads=False,  # threads=False lebih stabil, hindari rate limit
+                auto_adjust=True, timeout=20
+            )
             for t in batch:
                 try:
-                    df=raw[t].dropna() if len(batch)>1 else raw.dropna()
-                    if len(df)>=50: all_dfs[t]=df
+                    df = raw[t].dropna() if len(batch) > 1 else raw.dropna()
+                    if len(df) >= 50: all_dfs[t] = df
                 except: pass
-        except: pass
-        time.sleep(0.3)
+        except Exception as ex:
+            err = str(ex)
+            if "Rate" in err or "429" in err or "Too Many" in err:
+                time.sleep(5)  # backoff kalau rate limited
+            else:
+                time.sleep(0.5)
+        time.sleep(0.5)  # throttle antar batch
     return all_dfs
 
 def fetch_intraday(tickers_yf):
@@ -389,22 +398,60 @@ def fetch_intraday(tickers_yf):
 # ════════════════════════════════════════════════════
 #  MARKET REGIME DETECTOR
 # ════════════════════════════════════════════════════
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)  # cache 10 menit — JKSE tidak perlu frequent update
 def get_market_regime():
-    try:
-        df=yf.download("^JKSE",period="90d",interval="1d",progress=False,auto_adjust=True)
-        if df is None or len(df)<55: return ("UNKNOWN",0,0,0,"Data kurang",0.0)
-        close=df["Close"].squeeze()
-        ema20=float(close.ewm(span=20,adjust=False).mean().iloc[-1])
-        ema55=float(close.ewm(span=55,adjust=False).mean().iloc[-1])
-        price=float(close.iloc[-1])
-        chg=float(((close.iloc[-1]-close.iloc[-2])/close.iloc[-2])*100)
-        if price<ema20:            regime="RED";      detail=f"IHSG {price:,.0f} < EMA20 → Bearish"
-        elif price>ema20 and price>ema55: regime="GREEN"; detail=f"IHSG {price:,.0f} > EMA20 & EMA55 → Bullish"
-        else:                      regime="SIDEWAYS"; detail=f"IHSG {price:,.0f} antara EMA20-EMA55"
-        return (regime,price,ema20,ema55,detail,chg)
-    except Exception as ex:
-        return ("UNKNOWN",0,0,0,f"Error: {str(ex)[:40]}",0.0)
+    """
+    Fetch IHSG daily data untuk deteksi regime market.
+    Fallback ke UNKNOWN jika rate limited atau gagal.
+    """
+    # Coba beberapa ticker alternatif IHSG
+    tickers_to_try = ["^JKSE", "COMPOSITE.JK", "^JKSE"]
+    
+    for attempt, ticker in enumerate(tickers_to_try):
+        try:
+            if attempt > 0:
+                time.sleep(2)  # tunggu sebentar sebelum retry
+            
+            df = yf.download(
+                ticker, period="90d", interval="1d",
+                progress=False, auto_adjust=True,
+                timeout=15
+            )
+            
+            if df is None or len(df) < 10:
+                continue
+                
+            close = df["Close"].squeeze()
+            if len(close) < 10: continue
+            
+            ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+            ema55 = float(close.ewm(span=min(55, len(close)-1), adjust=False).mean().iloc[-1])
+            price = float(close.iloc[-1])
+            chg   = float(((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) * 100)
+            
+            if price < ema20:
+                regime = "RED"
+                detail = f"IHSG {price:,.0f} < EMA20 {ema20:,.0f} → Bearish"
+            elif price > ema20 and price > ema55:
+                regime = "GREEN"
+                detail = f"IHSG {price:,.0f} > EMA20 & EMA55 → Bullish"
+            else:
+                regime = "SIDEWAYS"
+                detail = f"IHSG {price:,.0f} antara EMA20-EMA55 → Sideways"
+            
+            return (regime, price, ema20, ema55, detail, chg)
+            
+        except Exception as ex:
+            err_str = str(ex)
+            if "Rate" in err_str or "429" in err_str or "Too Many" in err_str:
+                # Rate limited — tunggu dan coba lagi
+                time.sleep(3)
+                continue
+            # Error lain — skip
+            continue
+    
+    # Semua attempt gagal → return UNKNOWN dengan pesan yang informatif
+    return ("UNKNOWN", 0, 0, 0, "IHSG data unavailable (rate limit) — manual mode aktif", 0.0)
 
 def get_regime_config(regime):
     cfgs={
