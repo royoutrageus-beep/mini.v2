@@ -663,6 +663,7 @@ with tab_scanner:
                 except: continue
             prog_ph.empty()
             st.session_state.scan_results = results
+            st.session_state.last_scan_time = datetime.now(jakarta_tz).timestamp()
         except Exception as e:
             prog_ph.empty()
             st.error(f"Scan error: {str(e)[:100]}")
@@ -1024,4 +1025,46 @@ st.markdown(f"""
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;"><span style="color:#ff7b00">{datetime.now(jakarta_tz).strftime("%H:%M:%S")} WIB</span> · Next refresh 300s</div>
 </div>""", unsafe_allow_html=True)
 
-# Auto-refresh dinonaktifkan — refresh manual untuk data terbaru
+# ── AUTO REFRESH — pakai timer di session state, tidak blocking ──
+if "last_scan_time" not in st.session_state:
+    st.session_state.last_scan_time = None
+
+REFRESH_INTERVAL = 15 * 60  # 15 menit dalam detik
+
+now_ts = datetime.now(jakarta_tz).timestamp()
+
+# Hitung sisa waktu
+if st.session_state.last_scan_time:
+    elapsed   = now_ts - st.session_state.last_scan_time
+    remaining = max(0, REFRESH_INTERVAL - elapsed)
+    mnt = int(remaining // 60)
+    sec = int(remaining % 60)
+
+    # Tampilkan countdown di footer
+    st.markdown(f"""
+    <div style="margin-top:8px;font-family:Space Mono,monospace;font-size:10px;
+         color:#4a5568;text-align:center;">
+      ⏱️ Auto-refresh dalam: <span style="color:#ff7b00">{mnt:02d}:{sec:02d}</span>
+      &nbsp;·&nbsp; Last scan: <span style="color:#2dd4bf">
+      {datetime.fromtimestamp(st.session_state.last_scan_time, jakarta_tz).strftime("%H:%M:%S")} WIB
+      </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Kalau sudah 15 menit → trigger auto scan
+    if elapsed >= REFRESH_INTERVAL and st.session_state.scan_results:
+        st.session_state.last_scan_time = now_ts
+        st.rerun()
+    else:
+        # Rerun tiap 30 detik untuk update countdown — ringan, tidak fetch data
+        time.sleep(30)
+        st.rerun()
+else:
+    st.markdown("""
+    <div style="margin-top:8px;font-family:Space Mono,monospace;font-size:10px;
+         color:#4a5568;text-align:center;">
+      ⏱️ Auto-refresh aktif setelah scan pertama
+    </div>
+    """, unsafe_allow_html=True)
+    time.sleep(30)
+    st.rerun()
