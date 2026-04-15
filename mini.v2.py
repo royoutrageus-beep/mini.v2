@@ -5,32 +5,29 @@ import time
 import requests
 import numpy as np
 import pytz
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# ════════════════════════════════════════════════════════
-#  ⚙️  CONFIG — SEMUA KEY DI STREAMLIT SECRETS
-# ════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════
+#  THETA TURBO v5 — DATASECTORS EDITION
+#  Secrets: DATASECTORS_API_KEY, DS_DAILY_QUOTA,
+#           TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+# ════════════════════════════════════════════════════
 DATASECTORS_API_KEY = st.secrets["DATASECTORS_API_KEY"]
 DS_DAILY_QUOTA      = int(st.secrets.get("DS_DAILY_QUOTA", 5000))
 TOKEN               = st.secrets.get("TELEGRAM_TOKEN", "")
 CHAT_ID             = st.secrets.get("TELEGRAM_CHAT_ID", "")
-# ════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════
 
 jakarta_tz = pytz.timezone("Asia/Jakarta")
 DS_BASE    = "https://api.datasectors.com/api"
 DS_HEADERS = {"X-API-Key": DATASECTORS_API_KEY, "Content-Type": "application/json"}
 
-# ── SESSION STATE ──
-for _k, _v in [("ds_calls_today",0),("ds_date",None),("data_source","Belum scan"),
-                ("wl_results",[]),("wl_mode_used",""),("tt_last_sent",set())]:
+for _k,_v in [("scan_results",[]),("last_scan_time",None),("data_dict",{}),
+               ("wl_results",[]),("wl_mode_used",""),("tt_last_sent",set()),
+               ("last_scan_mode","Scalping ⚡")]:
     if _k not in st.session_state: st.session_state[_k] = _v
-_today = datetime.now(jakarta_tz).date()
-if st.session_state.ds_date != _today:
-    st.session_state.ds_calls_today = 0
-    st.session_state.ds_date = _today
 
-# ── PAGE CONFIG ──
-st.set_page_config(layout="wide", page_title="Theta Turbo v5", page_icon="🔥",
+st.set_page_config(layout="wide", page_title="Theta Turbo — DataSectors", page_icon="🔥",
                    initial_sidebar_state="collapsed")
 
 st.markdown("""
@@ -326,93 +323,41 @@ def send_telegram_alert(results_top, source="Scanner", mode=""):
     except: pass
 
 # ════════════════════════════════════════════════════
-#  DATA ENGINE — HYBRID DATASECTORS + YFINANCE
+#  DATA ENGINE — DATASECTORS
 # ════════════════════════════════════════════════════
-def ds_ok(n=1):
-    return bool(DATASECTORS_API_KEY) and (st.session_state.ds_calls_today+n)<=DS_DAILY_QUOTA
-
-def ds_bump(n=1): st.session_state.ds_calls_today += n
-
-def fetch_ohlcv_ds(ticker, interval="15m", limit=120):
+@st.cache_data(ttl=900)
+def fetch_ohlcv_ds_cached(ticker, interval="15m", limit=120):
     try:
-        r=requests.post(f"{DS_BASE}/chart/ohlcv",
-            json={"symbol":ticker,"interval":interval,"limit":limit},
+        r = requests.post(f"{DS_BASE}/chart/ohlcv",
+            json={"symbol": ticker, "interval": interval, "limit": limit},
             headers=DS_HEADERS, timeout=10)
-        ds_bump()
-        if r.status_code!=200: return None
-        d=r.json()
+        if r.status_code != 200: return None
+        d = r.json()
         if not d.get("success"): return None
-        rows=d.get("data",[])
+        rows = d.get("data", [])
         if not rows: return None
-        df=pd.DataFrame(rows)
-        df.columns=[c.title() for c in df.columns]
+        df = pd.DataFrame(rows)
+        df.columns = [c.title() for c in df.columns]
         if "Timestamp" in df.columns:
-            df["Datetime"]=pd.to_datetime(df["Timestamp"],unit="s",errors="coerce")
-            df=df.set_index("Datetime")
+            df["Datetime"] = pd.to_datetime(df["Timestamp"], unit="s", errors="coerce")
+            df = df.set_index("Datetime")
         for col in ["Open","High","Low","Close","Volume"]:
-            if col in df.columns: df[col]=pd.to_numeric(df[col],errors="coerce")
-        df=df.dropna(subset=["Close"])
-        return df if len(df)>=20 else None
+            if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["Close"])
+        return df if len(df) >= 20 else None
     except: return None
 
-# ✅ FIX: cache_data nempel LANGSUNG ke fungsi, bukan ke comment!
-@st.cache_data(ttl=300)
-def fetch_intraday_yf_cached(tickers_tuple, chunk=25):
-    """yFinance fetch dengan caching 5 menit — JAUH lebih cepat di re-run."""
-    tickers = list(tickers_tuple)
+def fetch_intraday(tickers_yf):
     all_dfs = {}
-    for i in range(0, len(tickers), chunk):
-        batch = tickers[i:i+chunk]
-        try:
-            raw = yf.download(
-                batch, period="5d", interval="15m",
-                group_by="ticker", progress=False,
-                threads=False,  # threads=False lebih stabil, hindari rate limit
-                auto_adjust=True, timeout=20
-            )
-            for t in batch:
-                try:
-                    if len(batch) > 1:
-                        df = raw[t].dropna()
-                    else:
-                        # Single ticker — handle MultiIndex
-                        df = raw.copy()
-                        if isinstance(df.columns, pd.MultiIndex):
-                            df.columns = df.columns.droplevel(1)
-                        df = df.dropna()
-                    if len(df) >= 50: all_dfs[t] = df
-                except: pass
-        except Exception as ex:
-            err = str(ex)
-            if "Rate" in err or "429" in err or "Too Many" in err:
-                time.sleep(5)  # backoff kalau rate limited
-            else:
-                time.sleep(0.5)
-        time.sleep(0.5)  # throttle antar batch
+    for t in [x.replace(".JK","") for x in tickers_yf]:
+        df = fetch_ohlcv_ds_cached(t, "15m", 120)
+        if df is not None and len(df) >= 50:
+            all_dfs[t + ".JK"] = df
+        time.sleep(0.05)
     return all_dfs
 
-def fetch_intraday(tickers_yf):
-    """Hybrid: DataSectors → yFinance fallback (dengan cache)."""
-    tickers_raw=[t.replace(".JK","") for t in tickers_yf]
-    if ds_ok(1):
-        result={}
-        for t in tickers_raw:
-            if not ds_ok(): break
-            df=fetch_ohlcv_ds(t,"15m",120)
-            if df is not None and len(df)>=50:
-                result[t+".JK"]=df
-            time.sleep(0.12)
-        if result:
-            st.session_state.data_source="DataSectors 🟢"
-            return result
-        st.session_state.data_source="yFinance (DS gagal) 🟡"
-    else:
-        rem=DS_DAILY_QUOTA-st.session_state.ds_calls_today
-        st.session_state.data_source=("yFinance (API key belum diisi) ⚪"
-            if not bool(DATASECTORS_API_KEY)
-            else f"yFinance (Sisa quota: {rem}) 🔴")
-    # yFinance dengan cache — pakai tuple supaya bisa di-hash
-    return fetch_intraday_yf_cached(tuple(tickers_yf))
+DATA_SOURCE_LABEL = "DataSectors ⚡"
+DATA_SOURCE_COLOR = "#2dd4bf"
 
 # ════════════════════════════════════════════════════
 #  MARKET REGIME DETECTOR
@@ -457,30 +402,18 @@ def get_regime_config(regime):
 #  WATCHLIST ANALYZER
 # ════════════════════════════════════════════════════
 def analyze_watchlist(tickers_raw, mode="Reversal 🎯"):
-    results=[]
+    results = []
     for t in tickers_raw:
-        t=t.strip().upper()
+        t = t.strip().upper()
         if not t: continue
-        df=None
-        if ds_ok(): df=fetch_ohlcv_ds(t,"15m",150)
-        if df is None:
-            try:
-                raw=yf.download(t+".JK", period="5d", interval="15m",
-                                progress=False, auto_adjust=True, threads=False)
-                if not raw.empty:
-                    if isinstance(raw.columns, pd.MultiIndex):
-                        raw.columns = raw.columns.droplevel(1)
-                    df = raw.dropna()
-                    if len(df) < 10: df = None
-                else:
-                    df = None
-            except: pass
-        if df is None or len(df)<55:
-            results.append({"Ticker":t,"Price":0,"Score":0,"Signal":"-","RSI-EMA":0,
-                "Stoch K":0,"RVOL":0,"BB%":0,"Trend":"-","TP":0,"SL":0,"R:R":0,
-                "ROC 3B%":0,"VWAP":0,"ATR":0,"Reasons":"No data","_class":""}); continue
+        df = fetch_ohlcv_ds_cached(t, "15m", 150)
+        if df is None or len(df) < 55:
+            results.append({"Ticker":t,"Price":0,"Score":0,"Signal":"No data",
+                "RSI-EMA":0,"Stoch K":0,"RVOL":0,"BB%":0,"Trend":"-",
+                "TP":0,"SL":0,"R:R":0,"ROC 3B%":0,"VWAP":0,"ATR":0,
+                "Reasons":"No data","_class":""}); continue
         try:
-            df=apply_intraday_indicators(df)
+            df = apply_intraday_indicators(df)
             r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3] if len(df)>=3 else p
             close=float(r["Close"]); atr=float(r["ATR"])
             if mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p,p2);  tp=close+1.5*atr; sl=close-0.8*atr
@@ -489,27 +422,24 @@ def analyze_watchlist(tickers_raw, mode="Reversal 🎯"):
             sig=get_signal(sc,mode); rr=(tp-close)/max(close-sl,0.01)
             e9=float(r["EMA9"]); e21=float(r["EMA21"]); e50=float(r["EMA50"])
             trend="▲ UP" if e9>e21>e50 else("▼ DOWN" if e9<e21<e50 else "◆ SIDE")
-            results.append({"Ticker":t,"Price":int(close),"Score":sc,"Signal":sig,"Trend":trend,
-                "RSI-EMA":round(float(r["RSI_EMA"]),1),"Stoch K":round(float(r["STOCH_K"]),1),
+            results.append({"Ticker":t,"Price":int(close),"Score":sc,"Signal":sig,
+                "Trend":trend,"RSI-EMA":round(float(r["RSI_EMA"]),1),"Stoch K":round(float(r["STOCH_K"]),1),
                 "RVOL":round(float(r["RVOL"]),2),"BB%":round(float(r["BB_pct"]),2),
                 "ROC 3B%":round(float(r["ROC3"])*100,2),"VWAP":int(float(r["VWAP"])),
                 "TP":int(tp),"SL":int(sl),"R:R":round(rr,1),"ATR":round(atr,0),
                 "Reasons":" · ".join(reasons),"_class":get_card_class(sig)})
         except Exception as ex:
-            results.append({"Ticker":t,"Price":0,"Score":0,"Signal":f"Err:{str(ex)[:25]}",
-                "RSI-EMA":0,"Stoch K":0,"RVOL":0,"BB%":0,"Trend":"-","TP":0,"SL":0,
-                "R:R":0,"ROC 3B%":0,"VWAP":0,"ATR":0,"Reasons":"","_class":""})
+            results.append({"Ticker":t,"Price":0,"Score":0,"Signal":f"Err:{str(ex)[:20]}",
+                "RSI-EMA":0,"Stoch K":0,"RVOL":0,"BB%":0,"Trend":"-",
+                "TP":0,"SL":0,"R:R":0,"ROC 3B%":0,"VWAP":0,"ATR":0,"Reasons":"","_class":""})
     return results
 
-# ════════════════════════════════════════════════════
-#  HEADER
-# ════════════════════════════════════════════════════
 now_jkt=datetime.now(jakarta_tz)
 st.markdown(f"""
 <div class="tt-header">
   <div>
     <div class="tt-logo">🔥 THETA TURBO</div>
-    <div class="tt-sub">Intraday 15M Scanner · Hybrid Engine v5.0</div>
+    <div class="tt-sub">Intraday 15M · DataSectors Edition · Auto-15M</div>
   </div>
   <div class="live-badge"><div class="live-dot"></div>LIVE {now_jkt.strftime("%H:%M:%S")} WIB</div>
 </div>
@@ -664,6 +594,7 @@ with tab_scanner:
             prog_ph.empty()
             st.session_state.scan_results = results
             st.session_state.last_scan_time = datetime.now(jakarta_tz).timestamp()
+            st.session_state.last_scan_mode = scan_mode
         except Exception as e:
             prog_ph.empty()
             st.error(f"Scan error: {str(e)[:100]}")
@@ -1068,3 +999,88 @@ else:
     """, unsafe_allow_html=True)
     time.sleep(30)
     st.rerun()
+
+# ─────────────────────────────────────────────
+#  FOOTER + AUTO REFRESH 15 MENIT
+# ─────────────────────────────────────────────
+REFRESH_INTERVAL = 15 * 60
+now_ts = datetime.now(jakarta_tz).timestamp()
+
+if st.session_state.last_scan_time:
+    elapsed   = now_ts - st.session_state.last_scan_time
+    remaining = max(0, REFRESH_INTERVAL - elapsed)
+    mnt = int(remaining // 60); sec = int(remaining % 60)
+    time_str = f"Next scan: {mnt:02d}:{sec:02d}"
+    last_str  = datetime.fromtimestamp(st.session_state.last_scan_time, jakarta_tz).strftime("%H:%M:%S")
+else:
+    time_str = "Belum scan"; last_str = "-"
+
+st.markdown(f"""
+<div style="margin-top:28px;padding-top:14px;border-top:1px solid #1c2533;
+     display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+  <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">
+    🔥 Theta Turbo v5 · <span style="color:{DATA_SOURCE_COLOR}">{DATA_SOURCE_LABEL}</span>
+  </div>
+  <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">
+    ⏱️ <span style="color:#ff7b00">{time_str}</span>
+    &nbsp;·&nbsp; Last: <span style="color:#2dd4bf">{last_str} WIB</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── AUTO SCAN TRIGGER ──
+if st.session_state.last_scan_time and st.session_state.scan_results:
+    elapsed = now_ts - st.session_state.last_scan_time
+    if elapsed >= REFRESH_INTERVAL:
+        # Waktu auto-scan — jalankan ulang
+        st.session_state.last_scan_time = now_ts
+        _scan_list = stocks_yf
+        _placeholder = st.empty()
+        _placeholder.info(f"⏱️ Auto-refresh {REFRESH_INTERVAL//60} menit — scanning...")
+        try:
+            _dd = fetch_intraday(_scan_list)
+            st.session_state.data_dict = _dd
+            _mode = st.session_state.get("last_scan_mode", "Scalping ⚡")
+            _res = []
+            for _tk in list(_dd.keys()):
+                try:
+                    _df = _dd[_tk].copy()
+                    if len(_df) < 55: continue
+                    _df = apply_intraday_indicators(_df)
+                    _r=_df.iloc[-1]; _p=_df.iloc[-2]; _p2=_df.iloc[-3] if len(_df)>=3 else _p
+                    _c=float(_r["Close"]); _t=_c*float(_r["Volume"]); _rv=float(_r["RVOL"])
+                    if _t < 500_000_000 or _rv < 1.5: continue
+                    if _mode=="Scalping ⚡":   _sc,_rsn,_=score_scalping(_r,_p,_p2)
+                    elif _mode=="Momentum 🚀": _sc,_rsn,_=score_momentum(_r,_p,_p2)
+                    else:                      _sc,_rsn,_=score_reversal(_r,_p,_p2)
+                    if _sc < 4: continue
+                    _sig=get_signal(_sc,_mode)
+                    if _sig=="WAIT": continue
+                    _atr=float(_r["ATR"])
+                    if _mode=="Scalping ⚡":   _tp=_c+1.5*_atr; _sl=_c-0.8*_atr
+                    elif _mode=="Momentum 🚀": _tp=_c+2.0*_atr; _sl=_c-1.0*_atr
+                    else:                      _tp=_c+2.5*_atr; _sl=_c-0.8*_atr
+                    _rr=(_tp-_c)/max(_c-_sl,0.01)
+                    _e9=float(_r["EMA9"]); _e21=float(_r["EMA21"]); _e50=float(_r["EMA50"])
+                    _tr="▲ UP" if _e9>_e21>_e50 else("▼ DOWN" if _e9<_e21<_e50 else "◆ SIDE")
+                    _res.append({"Ticker":stock_map.get(_tk,_tk.replace(".JK","")),"Price":int(_c),
+                        "Score":_sc,"Signal":_sig,"Trend":_tr,
+                        "RSI-EMA":round(float(_r["RSI_EMA"]),1),"Stoch K":round(float(_r["STOCH_K"]),1),
+                        "Stoch D":round(float(_r["STOCH_D"]),1),"MACD Hist":round(float(_r["MACD_Hist"]),4),
+                        "RVOL":round(_rv,2),"BB%":round(float(_r["BB_pct"]),2),
+                        "ROC 3B%":round(float(_r["ROC3"])*100,2),"VWAP":int(float(_r["VWAP"])),
+                        "TP":int(_tp),"SL":int(_sl),"R:R":round(_rr,1),
+                        "Turnover(M)":round(_t/1e6,1),"Reasons":" · ".join(_rsn),
+                        "_class":get_card_class(_sig)})
+                except: continue
+            if _res:
+                st.session_state.scan_results = _res
+                _gacor=[r for r in _res if "GACOR" in r.get("Signal","") or "REVERSAL" in r.get("Signal","")]
+                if _gacor: send_telegram_alert(_gacor[:5])
+        except: pass
+        _placeholder.empty()
+        st.rerun()
+
+# Countdown update tiap 30 detik (ringan, tidak fetch data)
+time.sleep(30)
+st.rerun()
