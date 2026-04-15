@@ -346,28 +346,60 @@ def send_telegram_alert(results_top, source="Scanner", mode=""):
 #  DATA ENGINE — YFINANCE
 # ════════════════════════════════════════════════════
 @st.cache_data(ttl=900)
-def fetch_intraday_cached(tickers_tuple, chunk=25):
+def fetch_intraday_cached(tickers_tuple, chunk=50):
+    """
+    yFinance batch download — cache 15 menit.
+    chunk=50: lebih sedikit request, lebih cepat.
+    period=3d: cukup untuk 15M scanner, hemat bandwidth.
+    """
     tickers = list(tickers_tuple)
     all_dfs = {}
     for i in range(0, len(tickers), chunk):
         batch = tickers[i:i+chunk]
         try:
-            raw = yf.download(batch, period="5d", interval="15m",
-                              group_by="ticker", progress=False,
-                              threads=False, auto_adjust=True, timeout=20)
+            raw = yf.download(
+                batch,
+                period="3d",          # 3 hari cukup untuk 15M intraday
+                interval="15m",
+                group_by="ticker",
+                progress=False,
+                threads=True,         # parallel download per ticker dalam batch
+                auto_adjust=True,
+                timeout=30
+            )
+            if raw.empty:
+                continue
+
+            # Handle MultiIndex columns (yfinance >= 0.2.x)
             for t in batch:
                 try:
                     if len(batch) > 1:
-                        df = raw[t].dropna()
+                        # Multi-ticker: raw[ticker] langsung
+                        if t in raw.columns.get_level_values(1):
+                            df = raw.xs(t, axis=1, level=1).dropna()
+                        else:
+                            df = raw[t].dropna()
                     else:
+                        # Single ticker: flatten MultiIndex
                         df = raw.copy()
-                        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+                        if isinstance(df.columns, pd.MultiIndex):
+                            df.columns = df.columns.droplevel(1)
                         df = df.dropna()
-                    if len(df) >= 50: all_dfs[t] = df
+
+                    if len(df) >= 30:
+                        all_dfs[t] = df
                 except: pass
+
         except Exception as ex:
-            if "Rate" in str(ex) or "429" in str(ex): time.sleep(5)
-        time.sleep(0.4)
+            err = str(ex)
+            if "Rate" in err or "429" in err or "Too Many" in err:
+                time.sleep(8)  # backoff rate limit
+            else:
+                time.sleep(1)
+            continue
+
+        time.sleep(0.3)  # throttle antar batch
+
     return all_dfs
 
 def fetch_intraday(tickers_yf):
@@ -375,6 +407,7 @@ def fetch_intraday(tickers_yf):
 
 DATA_SOURCE_LABEL = "yFinance ☕"
 DATA_SOURCE_COLOR = "#ffb700"
+
 
 # ════════════════════════════════════════════════════
 #  MARKET REGIME DETECTOR
@@ -425,10 +458,11 @@ def analyze_watchlist(tickers_raw, mode="Reversal 🎯"):
         if not t: continue
         df = None
         try:
-            raw = yf.download(t+".JK", period="5d", interval="15m",
-                              progress=False, auto_adjust=True, threads=False)
+            raw = yf.download(t+".JK", period="3d", interval="15m",
+                              progress=False, auto_adjust=True, threads=False, timeout=15)
             if not raw.empty:
-                if isinstance(raw.columns, pd.MultiIndex): raw.columns = raw.columns.droplevel(1)
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.droplevel(1)
                 df = raw.dropna()
                 if len(df) < 10: df = None
         except: pass
