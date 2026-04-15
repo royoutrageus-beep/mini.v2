@@ -174,6 +174,9 @@ def vwap(df):
     return (tp*df["Volume"]).cumsum()/df["Volume"].cumsum()
 
 def apply_intraday_indicators(df):
+    # Safety: flatten MultiIndex columns kalau ada
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
     df["EMA9"]=ema(df["Close"],9);  df["EMA21"]=ema(df["Close"],21)
     df["EMA50"]=ema(df["Close"],50); df["EMA200"]=ema(df["Close"],200)
     df["RSI"],df["RSI_EMA"]=rsi_smooth(df["Close"],14,3)
@@ -360,7 +363,14 @@ def fetch_intraday_yf_cached(tickers_tuple, chunk=25):
             )
             for t in batch:
                 try:
-                    df = raw[t].dropna() if len(batch) > 1 else raw.dropna()
+                    if len(batch) > 1:
+                        df = raw[t].dropna()
+                    else:
+                        # Single ticker — handle MultiIndex
+                        df = raw.copy()
+                        if isinstance(df.columns, pd.MultiIndex):
+                            df.columns = df.columns.droplevel(1)
+                        df = df.dropna()
                     if len(df) >= 50: all_dfs[t] = df
                 except: pass
         except Exception as ex:
@@ -482,8 +492,15 @@ def analyze_watchlist(tickers_raw, mode="Reversal 🎯"):
         if ds_ok(): df=fetch_ohlcv_ds(t,"15m",150)
         if df is None:
             try:
-                raw=yf.download(t+".JK",period="5d",interval="15m",progress=False,auto_adjust=True)
-                df=raw.dropna() if not raw.empty else None
+                raw=yf.download(t+".JK", period="5d", interval="15m",
+                                progress=False, auto_adjust=True, threads=False)
+                if not raw.empty:
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        raw.columns = raw.columns.droplevel(1)
+                    df = raw.dropna()
+                    if len(df) < 10: df = None
+                else:
+                    df = None
             except: pass
         if df is None or len(df)<55:
             results.append({"Ticker":t,"Price":0,"Score":0,"Signal":"-","RSI-EMA":0,
