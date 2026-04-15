@@ -7,6 +7,9 @@ import numpy as np
 import pytz
 from datetime import datetime
 
+if 'ds_calls_today' not in st.session_state:
+    st.session_state.ds_calls_today = 0
+
 # ════════════════════════════════════════════════════
 #  THETA TURBO v5 — DATASECTORS EDITION
 #  Secrets: DATASECTORS_API_KEY, DS_DAILY_QUOTA,
