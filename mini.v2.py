@@ -8,21 +8,26 @@ import pytz
 from datetime import datetime
 
 # ════════════════════════════════════════════════════
-#  THETA TURBO v5 — YFINANCE EDITION
-#  Secrets: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+#  THETA TURBO v5 — DATASECTORS EDITION
+#  Secrets: DATASECTORS_API_KEY, DS_DAILY_QUOTA,
+#           TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 # ════════════════════════════════════════════════════
-TOKEN   = st.secrets.get("TELEGRAM_TOKEN", "")
-CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
+DATASECTORS_API_KEY = st.secrets["DATASECTORS_API_KEY"]
+DS_DAILY_QUOTA      = int(st.secrets.get("DS_DAILY_QUOTA", 5000))
+TOKEN               = st.secrets.get("TELEGRAM_TOKEN", "")
+CHAT_ID             = st.secrets.get("TELEGRAM_CHAT_ID", "")
 # ════════════════════════════════════════════════════
 
 jakarta_tz = pytz.timezone("Asia/Jakarta")
+DS_BASE    = "https://api.datasectors.com/api"
+DS_HEADERS = {"X-API-Key": DATASECTORS_API_KEY, "Content-Type": "application/json"}
 
 for _k,_v in [("scan_results",[]),("last_scan_time",None),("data_dict",{}),
                ("wl_results",[]),("wl_mode_used",""),("tt_last_sent",set()),
                ("last_scan_mode","Scalping ⚡")]:
     if _k not in st.session_state: st.session_state[_k] = _v
 
-st.set_page_config(layout="wide", page_title="Theta Turbo — yFinance", page_icon="🔥",
+st.set_page_config(layout="wide", page_title="Theta Turbo — DataSectors", page_icon="🔥",
                    initial_sidebar_state="collapsed")
 
 st.markdown("""
@@ -101,31 +106,56 @@ button[data-testid="baseButton-primary"]{background:var(--orange)!important;colo
 #  STOCK LIST
 # ════════════════════════════════════════════════════
 raw_stocks = [
-    "BBCA","BBRI","BMRI","BBNI","TLKM","ASII","UNVR","PGAS","ADRO","ITMG",
-    "PTBA","ANTM","INDF","ICBP","GGRM","HMSP","KLBF","UNTR","AALI","SMGR",
-    "BSDE","CTRA","SMRA","LPKR","PWON","JSMR","WIKA","ADHI","PTPP","WSKT",
-    "ARCI","ASSA","AKRA","BUMI","GOTO","BUKA","EMTK","INET","MEDC","INCO",
-    "MDKA","TINS","HRUM","DOID","RAJA","GEMS","BYAN","ESSA","ELSA","EXCL",
-    "ISAT","TBIG","TOWR","MNCN","SCMA","MAPI","ACES","ERAA","LPPF","HEAL",
-    "MIKA","SILO","SIDO","KAEF","INAF","DVLA","TSPC","MERK","ARTO","BRIS",
-    "BBYB","BJBR","BJTM","BBTN","BDMN","MEGA","BNGA","NISP","AMAR","NOBU",
-    "PNBN","SDRA","CFIN","ADMF","BFIN","DEFI","LPGI","MFIN","BBHI","BCIC",
-    "BGTG","BINA","DNAR","MAYA","MCOR","BABP","BACA","AGRO","TOBA","ABMM",
-    "PTRO","MYOH","KKGI","SGER","MBAP","MBSS","ADMR","BIPI","BOSS","ENRG",
-    "PKPK","RMKE","DEWA","COAL","INDY","APEX","DMAS","BEST","KIJA","MTLA",
-    "JRPT","MKPI","BKSL","GPRA","MDLN","NUSA","DART","CITY","LPCK","APLN",
-    "ASRI","DILD","DUTI","EMDE","MYOR","DLTA","ROTI","SKBM","SKLT","CLEO",
-    "STTP","ULTJ","MLBI","GOOD","HOKI","KEJU","CPIN","JPFA","MAIN","AISA",
-    "ADES","CAMP","BUDI","TBLA","DSNG","SGRO","LSIP","TAPG","SIMP","SSMS",
-    "CPRO","BWPT","ANJT","DCII","WIFI","GLVA","MLPT","MTDL","CHIP","ELIT",
-    "LUCK","AWAN","AXIO","NFCX","DIGI","DIVA","MCAS","WIRG","TECH","SMSM",
-    "HEXA","SCCO","JECC","KBLI","VOKS","LION","PICO","BRAM","GJTL","IMAS",
-    "AUTO","ASGR","ARNA","AMFG","IMPC","MLIA","WTON","INTP","BIRD","GIAA",
-    "SMDR","TMAS","BBRM","NELY","AKSI","SHIP","ELPI","PRDA","SAME","PEHA",
-    "PYFA","IRRA","NCKL","AMMN","BRPT","TPIA","MDKI","BTON","NIKL","SMCB",
-    "AGII","ALDO","ALKA","CTBN","DPNS","RUIS","SURE","IATA","TEBE","WOWS",
+    "AALI","ABBA","ABDA","ABMM","ACES","ACST","ADCP","ADES","ADHI","ADMF","ADMG","ADMR","ADRO","AGII","AGRO","AGRS",
+    "AHAP","AIMS","AISA","AKPI","AKRA","AKSI","ALDO","ALKA","ALMI","ALRE","AMAG","AMAR","AMFG","AMIN","AMMS","AMOR",
+    "AMRT","ANDI","ANJT","ANTM","APEX","APIC","APLI","APLN","ARCI","ARGO","ARII","ARKA","ARKO","ARMY","ARNA","ARTA",
+    "ARTI","ARTO","ASBI","ASCL","ASDM","ASGR","ASII","ASJT","ASLC","ASMI","ASPI","ASRI","ASRM","ASSA","ATAP","ATIC",
+    "ATLI","AUTO","AVIA","AWAN","AXIO","AYLS","BABP","BACA","BAIC","BAPA","BAPI","BARI","BATA","BATU","BAYU","BBCA",
+    "BBHI","BBKP","BBLD","BBMD","BBNI","BBRI","BBRM","BBSI","BBSS","BBTN","BBYB","BCAP","BCIC","BCIP","BDMN","BEBS",
+    "BEEF","BEER","BELI","BESS","BEST","BFIN","BGTG","BHIT","BIAS","BVIC","BIKA","BIMA","BINA","BIPI","BIPP","BIRD",
+    "BISI","BJBR","BJTM","BKDP","BKSL","BKSW","BLTA","BLTZ","BLUE","BMAS","BMBL","BMRI","BMTR","BNBA","BNGA","BNII",
+    "BNLI","BOBA","BOGA","BOKE","BOLA","BORO","BOSS","BPFI","BPII","BPTR","BRAM","BRIS","BRMS","BRNA","BRPT","BSDE",
+    "BSIM","BSML","BSSR","BSWD","BTEK","BTEL","BTON","BTPS","BUDI","BUKK","BULL","BUMI","BUVA","BWPT","BYAN","CAKK",
+    "CAMP","CARS","CASH","CASS","CASY","CBRE","CEKA","CENT","CERE","CESS","CFIN","CHIP","CINT","CITA","CITY","CLAY",
+    "CLEO","CLPI","CMNT","CMPP","CMRY","CNKO","CNMA","CNTX","COAL","COCO","CPIN","CPRI","CPRO","CSAP","CSIS","CSMI",
+    "CSRA","CTBN","CTRA","CTRP","CTRS","CTTH","CUAN","DADA","DAJK","DART","DAYA","DEAL","DEFI","DEIT","DEWA","DFAM",
+    "DGIK","DGNS","DIGI","DILD","DIVA","DKFT","DLTA","DMMX","DMND","DMSX","DMTX","DNAR","DNET","DOID","DPNS","DPUM",
+    "DRMA","DSSA","DSST","DUCK","DUTI","DVLA","DWGL","DYAN","EAST","ECII","EDII","EKAD","ELIT","ELPI","ELSA","ELTY",
+    "EMAS","EMTK","ENRG","EPAC","EPMT","ERAA","ERTX","ESIP","ESSA","ESTA","ESTI","ETWA","EURO","EVIT","EXCL","FAPA",
+    "FAST","FASW","FEST","FIFA","FIMP","FIRE","FISH","FITT","FLMC","FMII","FORU","FORZ","FPNI","FREN","FUAD","FWCT",
+    "GAMA","GDST","GDYR","GEAS","GEMA","GEMS","GGRM","GGRP","GHON","GIAA","GJTL","GLOB","GLVA","GMCU","GMTD","GOLD",
+    "GOOD","GOTO","GPRA","GPSO","GRIA","GRPM","GSMF","GTBO","GWSA","GZCO","HADE","HAIS","HALO","HATM","HDFA","HDIT",
+    "HEAL","HELI","HERO","HEXA","HHPW","HIAM","HITS","HKMU","HMSP","HOKI","HOME","HOPE","HOTL","HRTA","HRUM","IATA",
+    "IBFN","IBOS","ICBP","ICON","IDPR","IFII","IFSH","IGAR","IIKP","IKAI","IKAN","IKBI","IMAS","IMJS","IMPC","INAF",
+    "INAI","INCF","INCO","INDF","INDO","INET","INFN","INFO","INPC","INPP","INPS","INRU","INSG","INTA","INTD","INTP",
+    "IPAC","IPCC","IPCM","IPPE","IPTV","IRRA","ISAP","ISAT","ISIG","ISSP","ITIC","ITMA","ITMG","JAST","JATI","JAVA",
+    "JECC","JGLE","JIHD","JKON","JKSW","JMAS","JPFA","JRPT","JSMR","JSPT","JTPE","KAEF","KARY","KAYU","KBAG","KBLI",
+    "KBLM","KBLV","KBMD","KDSI","KEEN","KEJU","KIAS","KICI","KIJA","KING","KINO","KIOS","KJEN","KKGI","KLAS","KLBF",
+    "KMDS","KMTR","KOBX","KOIN","KOKA","KOKI","KONI","KOPI","KOTA","KPAS","KPIG","KRAH","KRAS","KREN","LAAW","LABA",
+    "LAND","LAPD","LCGP","LCKM","LEAD","LIFE","LION","LPCK","LPGI","LPIN","LPKR","LPLI","LPPS","LPPF","LRNA","LSIP",
+    "LTLS","LUCK","LUCY","MABA","MAGP","MAHA","MAIN","MAMI","MAPA","MAPB","MAPI","MARI","MARK","MASA","MAYA","MBAP",
+    "MBMA","MBSS","MBTO","MCAS","MCOL","MCOR","MDIA","MDKA","MDKI","MDLN","MDPP","MEDC","MEGA","MENN","METI","METR",
+    "METS","MFIN","MFMI","MGNA","MICE","MIDI","MIKA","MINA","MIRA","MITI","MKAP","MKNT","MKPI","MLBI","MLIA","MLMS",
+    "MLPL","MLPT","MMIX","MNCN","MPMX","MPPA","MPRO","MRAT","MREI","MSIN","MSKY","MTDL","MTEL","MTFN","MTLA","MTMH",
+    "MTPS","MTRA","MTSM","MYOH","MYOR","MYPZ","MYRX","MYTX","NANO","NASA","NARE","NATO","NELY","NETV","NFCX","NICK",
+    "NICL","NIRO","NISM","NKEF","NKIT","NLMS","NOBU","NPGF","NRCA","NSSS","NTBK","NUSA","NVAM","NZIA","OASA","OBMD",
+    "OCAP","OCAS","OCDM","OKAS","OLIV","OMRE","OPMS","PADI","PAFI","PAMG","PANI","PANR","PANS","PANT","PARD","PARE",
+    "PBID","PBRX","PBSA","PCAR","PDES","PEGE","PEHA","PELI","PESS","PGAS","PGEO","PGUN","PICO","PJAA","PKPK","PLIN",
+    "PLNB","PLSN","PMJS","PMMP","PNBS","PNIN","PNLF","PNSE","POLA","POLL","POLU","POLY","POOL","PORT","POWR","PPGL",
+    "PPRE","PPRO","PRAS","PRDA","PRIM","PSAB","PSDN","PSGO","PSKT","PSSI","PTBA","PTDU","PTIS","PTPW","PTRO","PTSN",
+    "PTSP","PUDP","PURA","PURE","PURI","PWON","PYFA","RAAM","RACY","RAJA","RALS","RANC","RBMS","RCCC","RELI","REMA",
+    "RGAS","RICY","RIGS","RIMO","RISE","RMKE","RMKO","RODA","RONI","ROTI","SAFE","SAME","SAMF","SAMI","SANK","SANT",
+    "SAPX","SBAT","SBMA","SCCO","SCMA","SCNP","SCRB","SDMU","SDPC","SDRA","SEMA","SGER","SGRO","SHID","SHIP","SIAP",
+    "SILO","SIMA","SIMP","SINI","SIPD","SKBM","SKLT","SKYB","SLIS","SMAR","SMBR","SMCB","SMDM","SMDR","SMGR","SMMA",
+    "SMMT","SMRA","SMRU","SMSM","SNLK","SOFA","SOHO","SONA","SOSS","SOTS","SPMA","SPTO","SQMI","SRAJ","SRIL","SRTG",
+    "SSIA","SSMS","SSTM","STAA","STTP","SUGI","SULI","SUMI","SUNU","SUPR","SURE","SURV","SUTI","SWAT","SWID","TAMA",
+    "TAMU","TARA","TAXI","TBIG","TBLA","TBMS","TCID","TCOA","TCPI","TEBE","TECC","TECH","TELE","TFAS","TFCO","TGKA",
+    "TGUK","TIFA","TINS","TIRA","TIRT","TKIM","TLDN","TLKM","TMAS","TMPO","TNCA","TOBA","TOOL","TOTA","TOWR","TPAI",
+    "TPMA","TRGU","TRIL","TRIM","TRIN","TRIS","TRJA","TRST","TRUE","TRUK","TRUS","TSPC","TUGU","TULI","TYRE","UANG",
+    "UCID","UNIC","UNIT","UNSP","UNTR","UNVR","URBN","UVCR","VICI","VICO","VINS","VIPT","VIVA","VOKS","VOMR","VTNY",
+    "WAPO","WEGE","WEHA","WICO","WIDI","WIFI","WIGL","WIKA","WIKI","WIMM","WINE","WINS","WIRG","WITA","WMUU","WOOD",
+    "WOWS","WSBP","WSKT","WTON","YELO","YPAS","YULE","ZATA","ZBRA","ZINC"
 ]
-# Dedup
 seen = set(); raw_stocks = [x for x in raw_stocks if not (x in seen or seen.add(x))]
 stocks_yf = [s + ".JK" for s in raw_stocks]
 stock_map  = {s + ".JK": s for s in raw_stocks}
@@ -318,38 +348,41 @@ def send_telegram_alert(results_top, source="Scanner", mode=""):
     except: pass
 
 # ════════════════════════════════════════════════════
-#  DATA ENGINE — YFINANCE
+#  DATA ENGINE — DATASECTORS
 # ════════════════════════════════════════════════════
 @st.cache_data(ttl=900)
-def fetch_intraday_cached(tickers_tuple, chunk=25):
-    tickers = list(tickers_tuple)
-    all_dfs = {}
-    for i in range(0, len(tickers), chunk):
-        batch = tickers[i:i+chunk]
-        try:
-            raw = yf.download(batch, period="5d", interval="15m",
-                              group_by="ticker", progress=False,
-                              threads=False, auto_adjust=True, timeout=20)
-            for t in batch:
-                try:
-                    if len(batch) > 1:
-                        df = raw[t].dropna()
-                    else:
-                        df = raw.copy()
-                        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-                        df = df.dropna()
-                    if len(df) >= 50: all_dfs[t] = df
-                except: pass
-        except Exception as ex:
-            if "Rate" in str(ex) or "429" in str(ex): time.sleep(5)
-        time.sleep(0.4)
-    return all_dfs
+def fetch_ohlcv_ds_cached(ticker, interval="15m", limit=120):
+    try:
+        r = requests.post(f"{DS_BASE}/chart/ohlcv",
+            json={"symbol": ticker, "interval": interval, "limit": limit},
+            headers=DS_HEADERS, timeout=10)
+        if r.status_code != 200: return None
+        d = r.json()
+        if not d.get("success"): return None
+        rows = d.get("data", [])
+        if not rows: return None
+        df = pd.DataFrame(rows)
+        df.columns = [c.title() for c in df.columns]
+        if "Timestamp" in df.columns:
+            df["Datetime"] = pd.to_datetime(df["Timestamp"], unit="s", errors="coerce")
+            df = df.set_index("Datetime")
+        for col in ["Open","High","Low","Close","Volume"]:
+            if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["Close"])
+        return df if len(df) >= 20 else None
+    except: return None
 
 def fetch_intraday(tickers_yf):
-    return fetch_intraday_cached(tuple(tickers_yf))
+    all_dfs = {}
+    for t in [x.replace(".JK","") for x in tickers_yf]:
+        df = fetch_ohlcv_ds_cached(t, "15m", 120)
+        if df is not None and len(df) >= 50:
+            all_dfs[t + ".JK"] = df
+        time.sleep(0.05)
+    return all_dfs
 
-DATA_SOURCE_LABEL = "yFinance ☕"
-DATA_SOURCE_COLOR = "#ffb700"
+DATA_SOURCE_LABEL = "DataSectors ⚡"
+DATA_SOURCE_COLOR = "#2dd4bf"
 
 # ════════════════════════════════════════════════════
 #  MARKET REGIME DETECTOR
@@ -398,15 +431,7 @@ def analyze_watchlist(tickers_raw, mode="Reversal 🎯"):
     for t in tickers_raw:
         t = t.strip().upper()
         if not t: continue
-        df = None
-        try:
-            raw = yf.download(t+".JK", period="5d", interval="15m",
-                              progress=False, auto_adjust=True, threads=False)
-            if not raw.empty:
-                if isinstance(raw.columns, pd.MultiIndex): raw.columns = raw.columns.droplevel(1)
-                df = raw.dropna()
-                if len(df) < 10: df = None
-        except: pass
+        df = fetch_ohlcv_ds_cached(t, "15m", 150)
         if df is None or len(df) < 55:
             results.append({"Ticker":t,"Price":0,"Score":0,"Signal":"No data",
                 "RSI-EMA":0,"Stoch K":0,"RVOL":0,"BB%":0,"Trend":"-",
@@ -439,7 +464,7 @@ st.markdown(f"""
 <div class="tt-header">
   <div>
     <div class="tt-logo">🔥 THETA TURBO</div>
-    <div class="tt-sub">Intraday 15M · yFinance Edition · Auto-15M</div>
+    <div class="tt-sub">Intraday 15M · DataSectors Edition · Auto-15M</div>
   </div>
   <div class="live-badge"><div class="live-dot"></div>LIVE {now_jkt.strftime("%H:%M:%S")} WIB</div>
 </div>
@@ -458,8 +483,8 @@ chg_sym="▲" if ihsg_chg>=0 else "▼"
 st.markdown(f"""
 <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
   <div style="font-family:Space Mono,monospace;font-size:10px;padding:4px 12px;border-radius:20px;
-       background:rgba(255,183,0,.08);border:1px solid rgba(255,183,0,.3);color:#ffb700;">
-    ☕ yFinance
+       background:rgba(45,212,191,.08);border:1px solid rgba(45,212,191,.3);color:#2dd4bf;">
+    ⚡ DataSectors Live
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -707,7 +732,7 @@ with tab_watchlist:
         wl_run=st.button("🔍 Analisa", use_container_width=True, key="wl_run")
         wl_share=st.button("📋 Copy Hasil", use_container_width=True, key="wl_share")
         wl_tele=st.button("📡 Kirim Telegram", use_container_width=True, key="wl_tele")
-        st.caption("yFinance Active")
+        st.caption("DataSectors Active")
 
     if wl_run and wl_input.strip():
         raw_wl=list(dict.fromkeys([t.strip().upper() for line in wl_input.split("\n") for t in line.split(",") if t.strip()]))
