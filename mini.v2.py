@@ -532,11 +532,11 @@ with tab_scanner:
 
     # Display countdown
     if st.session_state.last_scan_time:
-        elapsed   = now_ts - st.session_state.last_scan_time
-        remaining = max(0, 300 - elapsed)
-        mnt = int(remaining//60); sec = int(remaining%60)
-        last_t = datetime.fromtimestamp(st.session_state.last_scan_time, jakarta_tz).strftime("%H:%M:%S")
-        st.caption(f"⏱️ Next auto-scan: {mnt:02d}:{sec:02d} · Last: {last_t} WIB")
+        _now_cd   = datetime.now(jakarta_tz).timestamp()
+        _rem_cd   = max(0, 300 - (_now_cd - st.session_state.last_scan_time))
+        _mnt_cd   = int(_rem_cd//60); _sec_cd = int(_rem_cd%60)
+        _last_cd  = datetime.fromtimestamp(st.session_state.last_scan_time, jakarta_tz).strftime("%H:%M:%S")
+        st.caption(f"⏱️ Next auto-scan: {_mnt_cd:02d}:{_sec_cd:02d} · Last: {_last_cd} WIB")
 
     # Show results
     results = st.session_state.scan_results
