@@ -372,7 +372,7 @@ def send_telegram(results_top, source="Scanner"):
 # ════════════════════════════════════════════════════
 #  DATA FETCH — cache 15 menit
 # ════════════════════════════════════════════════════
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=360)
 def fetch_intraday(tickers, chunk=25):
     all_dfs = {}
     for i in range(0, len(tickers), chunk):
@@ -467,12 +467,12 @@ with tab_scanner:
     # Scan button
     do_scan = st.button("🔥 MULAI SCAN SEKARANG", type="primary", use_container_width=True, key="btn_scan")
 
-    # Auto-refresh trigger
-    now_ts = datetime.now(jakarta_tz).timestamp()
-    if st.session_state.last_scan_time:
-        elapsed = now_ts - st.session_state.last_scan_time
-        if elapsed >= 300 and st.session_state.scan_results:  # 15 menit
-            do_scan = True  # auto trigger
+    # Auto-refresh trigger — fresh timestamp setiap check
+    _now_check = datetime.now(jakarta_tz).timestamp()
+    if st.session_state.last_scan_time and not do_scan:
+        _elapsed = _now_check - st.session_state.last_scan_time
+        if _elapsed >= 300 and st.session_state.scan_results:
+            do_scan = True  # auto trigger setiap 5 menit
 
     if do_scan:
         scan_list = stocks_yf[:200] if quick_mode else stocks_yf
@@ -514,7 +514,7 @@ with tab_scanner:
                 except: continue
             prog_ph.empty()
             st.session_state.scan_results = results
-            st.session_state.last_scan_time = now_ts
+            st.session_state.last_scan_time = datetime.now(jakarta_tz).timestamp()  # fresh timestamp
             st.session_state.last_scan_mode = scan_mode
             # Telegram alert
             if tele_on and results:
@@ -900,16 +900,14 @@ with tab_backtest:
 # ════════════════════════════════════════════════════
 #  FOOTER + AUTO REFRESH 15 MENIT
 # ════════════════════════════════════════════════════
-now_ts2 = datetime.now(jakarta_tz).timestamp()
+_now_f = datetime.now(jakarta_tz).timestamp()
 if st.session_state.last_scan_time:
-    elapsed2   = now_ts2 - st.session_state.last_scan_time
-    remaining2 = max(0, 300 - elapsed2)
-    mnt2 = int(remaining2//60); sec2 = int(remaining2%60)
+    _rem2 = max(0, 300 - (_now_f - st.session_state.last_scan_time))
+    mnt2 = int(_rem2//60); sec2 = int(_rem2%60)
     last_t2 = datetime.fromtimestamp(st.session_state.last_scan_time, jakarta_tz).strftime("%H:%M:%S")
-    time_info = f"⏱️ Next scan: <span style='color:#ff7b00'>{mnt2:02d}:{sec2:02d}</span> · Last: <span style='color:#2dd4bf'>{last_t2} WIB</span>"
+    time_info = f"⏱️ Next auto-scan: <span style='color:#ff7b00'>{mnt2:02d}:{sec2:02d}</span> · Last: <span style='color:#2dd4bf'>{last_t2} WIB</span>"
 else:
-    time_info = "⏱️ Belum scan"
-
+    time_info = "⏱️ Klik Scan untuk mulai"
 st.markdown(f"""
 <div style="margin-top:28px;padding-top:14px;border-top:1px solid #1c2533;
      display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
