@@ -606,6 +606,89 @@ def fetch_sector_rotation(sector_stocks):
     return results
 
 # ════════════════════════════════════════════════════
+#  SECTOR BETA & RELATIVE STRENGTH vs IHSG
+# ════════════════════════════════════════════════════
+@st.cache_data(ttl=3600)
+def calc_sector_beta(sector_name, sector_stocks, lookback=20):
+    """
+    Hitung beta sektor vs IHSG dan relative strength.
+    Beta > 1 = lebih volatile dari market
+    Beta < 1 = defensive
+    RS = return sektor - return IHSG (positif = outperform)
+    """
+    try:
+        # Fetch IHSG
+        ihsg = yf.download("^JKSE", period="60d", interval="1d",
+                           progress=False, auto_adjust=True)
+        if ihsg is None or len(ihsg) < lookback: return None
+        if isinstance(ihsg.columns, pd.MultiIndex): ihsg.columns = ihsg.columns.droplevel(1)
+        ihsg_ret = ihsg["Close"].pct_change().dropna()
+
+        # Fetch sektor (rata-rata return saham dalam sektor)
+        tickers_yf = [s+".JK" for s in sector_stocks[:8]]
+        raw = yf.download(tickers_yf, period="60d", interval="1d",
+                          group_by="ticker", progress=False,
+                          threads=True, auto_adjust=True)
+
+        sec_rets = []
+        for t in tickers_yf:
+            try:
+                if len(tickers_yf) > 1:
+                    df = raw[t]["Close"].dropna()
+                else:
+                    df = raw["Close"].dropna()
+                ret = df.pct_change().dropna()
+                sec_rets.append(ret)
+            except: pass
+
+        if not sec_rets: return None
+
+        # Align semua ke index yang sama
+        sec_avg = pd.concat(sec_rets, axis=1).mean(axis=1)
+        aligned  = pd.concat([ihsg_ret, sec_avg], axis=1).dropna()
+        aligned.columns = ["IHSG","Sektor"]
+
+        if len(aligned) < 10: return None
+
+        # Beta = Cov(Sektor, IHSG) / Var(IHSG)
+        cov    = aligned["Sektor"].cov(aligned["IHSG"])
+        var    = aligned["IHSG"].var()
+        beta   = round(cov / var, 2) if var > 0 else 1.0
+
+        # Correlation
+        corr   = round(aligned["Sektor"].corr(aligned["IHSG"]), 2)
+
+        # Relative Strength — 5 hari terakhir
+        rs5    = round((aligned["Sektor"].tail(5).sum() - aligned["IHSG"].tail(5).sum()) * 100, 2)
+
+        # Return 1 bulan
+        ret_1m_sec  = round(aligned["Sektor"].tail(20).sum() * 100, 2)
+        ret_1m_ihsg = round(aligned["IHSG"].tail(20).sum() * 100, 2)
+
+        # Max Drawdown sektor saat IHSG turun
+        down_days = aligned[aligned["IHSG"] < -0.005]
+        avg_down  = round(down_days["Sektor"].mean() * 100, 2) if len(down_days) > 0 else 0.0
+
+        return {
+            "sector": sector_name,
+            "beta": beta,
+            "corr": corr,
+            "rs5": rs5,
+            "ret_1m_sec": ret_1m_sec,
+            "ret_1m_ihsg": ret_1m_ihsg,
+            "avg_down": avg_down,  # rata-rata return saat IHSG turun
+            "defensive": beta < 0.8 and corr < 0.7,
+        }
+    except: return None
+
+def get_beta_label(beta):
+    if beta < 0.6:   return "🛡️ Very Defensive", "#00ff88"
+    elif beta < 0.8: return "🟢 Defensive",      "#00ff88"
+    elif beta < 1.0: return "🟡 Moderate",       "#ffb700"
+    elif beta < 1.3: return "🟠 Aggressive",     "#ff7b00"
+    else:            return "🔴 High Risk",       "#ff3d5a"
+
+# ════════════════════════════════════════════════════
 #  GAP UP SCANNER
 # ════════════════════════════════════════════════════
 @st.cache_data(ttl=300)
@@ -1435,14 +1518,100 @@ with tab_sector:
                       <span style="color:{sc}">{stk['chg']:+.1f}%</span>
                       <span style="color:#4a5568;">RVOL {stk['rvol']}x</span>
                     </div>""", unsafe_allow_html=True)
+    # ── BETA ANALYSIS SECTION ──
+    st.markdown('<div class="section-title" style="margin-top:24px;">Beta & Relative Strength vs IHSG</div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:12px;
+         padding:8px 12px;background:#0d1117;border-radius:6px;">
+      Beta mengukur seberapa besar sektor ikut jatuh/naik saat IHSG bergerak.<br>
+      🛡️ Beta &lt; 0.8 = Defensive (tahan banting) &nbsp;·&nbsp; 🔴 Beta &gt; 1.2 = Amplifier (kena hajar duluan)
+    </div>""", unsafe_allow_html=True)
+
+    do_beta = st.button("🔬 Hitung Beta Semua Sektor", use_container_width=True, key="btn_beta")
+    if "beta_data" not in st.session_state: st.session_state.beta_data = []
+
+    if do_beta:
+        beta_res = []
+        bp = st.progress(0)
+        secs = list(SECTORS.items())
+        for i, (sec_name, sec_stocks) in enumerate(secs):
+            bp.progress((i+1)/len(secs))
+            res = calc_sector_beta(sec_name, sec_stocks)
+            if res: beta_res.append(res)
+        bp.empty()
+        beta_res = sorted(beta_res, key=lambda x: x["beta"])
+        st.session_state.beta_data = beta_res
+
+    if st.session_state.beta_data:
+        beta_data = st.session_state.beta_data
+
+        # Summary tiles — defensive to aggressive
+        st.markdown("**Ranking: Paling Defensive → Paling Agresif**", unsafe_allow_html=False)
+        for b in beta_data:
+            beta_lbl, beta_col = get_beta_label(b["beta"])
+            rs_col   = "#00ff88" if b["rs5"]>0 else "#ff3d5a"
+            down_col = "#00ff88" if b["avg_down"]>0 else "#ff3d5a"
+            hormuz   = " ⚡" if b["sector"] in HORMUZ_SECTORS else ""
+            width    = min(100, int(abs(b["beta"])*50))
+
+            st.markdown(f"""
+            <div style="background:#0d1117;border:1px solid #1c2533;border-radius:8px;
+                 padding:12px 16px;margin-bottom:8px;border-left:4px solid {beta_col};">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                <div style="flex:2;">
+                  <div style="font-family:Space Mono,monospace;font-size:11px;font-weight:700;color:#c9d1d9;">
+                    {b['sector']}{hormuz}
+                  </div>
+                  <div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568;margin-top:2px;">
+                    Korrelasi IHSG: {b['corr']} &nbsp;·&nbsp; 1M Return: {b['ret_1m_sec']:+.1f}%
+                  </div>
+                </div>
+                <div style="text-align:center;min-width:80px;">
+                  <div style="font-family:Space Mono,monospace;font-size:20px;font-weight:700;color:{beta_col};">{b['beta']}</div>
+                  <div style="font-size:9px;color:{beta_col};">{beta_lbl}</div>
+                </div>
+                <div style="text-align:center;min-width:80px;">
+                  <div style="font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:{rs_col};">{b['rs5']:+.1f}%</div>
+                  <div style="font-size:9px;color:#4a5568;">RS 5 Hari</div>
+                </div>
+                <div style="text-align:center;min-width:80px;">
+                  <div style="font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:{down_col};">{b['avg_down']:+.2f}%</div>
+                  <div style="font-size:9px;color:#4a5568;">Avg saat IHSG ↓</div>
+                </div>
+              </div>
+              <div style="height:4px;background:#1c2533;border-radius:2px;margin-top:10px;overflow:hidden;">
+                <div style="width:{width}%;height:100%;background:{beta_col};border-radius:2px;transition:width .3s;"></div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+        # Insight box
+        defensive = [b for b in beta_data if b["beta"] < 0.8]
+        aggressive = [b for b in beta_data if b["beta"] > 1.2]
+        st.markdown(f"""
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px;">
+          <div style="background:rgba(0,255,136,.06);border:1px solid rgba(0,255,136,.2);border-radius:8px;padding:14px;">
+            <div style="font-family:Space Mono,monospace;font-size:10px;font-weight:700;color:#00ff88;margin-bottom:8px;">
+              🛡️ SEKTOR DEFENSIVE — AMAN SAAT IHSG MERAH
+            </div>
+            {"".join(f'<div style="font-family:Space Mono,monospace;font-size:10px;color:#c9d1d9;margin-bottom:3px;">• {b["sector"]} (β={b["beta"]})</div>' for b in defensive) or '<div style="color:#4a5568;font-size:10px;">Tidak ada sektor yang sangat defensive</div>'}
+          </div>
+          <div style="background:rgba(255,61,90,.06);border:1px solid rgba(255,61,90,.2);border-radius:8px;padding:14px;">
+            <div style="font-family:Space Mono,monospace;font-size:10px;font-weight:700;color:#ff3d5a;margin-bottom:8px;">
+              🔴 SEKTOR AGRESIF — KENA HAJAR DULUAN
+            </div>
+            {"".join(f'<div style="font-family:Space Mono,monospace;font-size:10px;color:#c9d1d9;margin-bottom:3px;">• {b["sector"]} (β={b["beta"]})</div>' for b in aggressive) or '<div style="color:#4a5568;font-size:10px;">Tidak ada sektor yang ekstrem agresif</div>'}
+          </div>
+        </div>""", unsafe_allow_html=True)
+
     else:
         st.markdown("""
         <div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;">
           <div style="font-size:32px;margin-bottom:12px;">🏭</div>
-          <div style="font-size:12px;letter-spacing:2px;">KLIK REFRESH SEKTOR</div>
+          <div style="font-size:12px;letter-spacing:2px;">KLIK REFRESH SEKTOR atau HITUNG BETA</div>
           <div style="font-size:10px;margin-top:8px;color:#2d3748;">
             Track sektor mana yang paling hot hari ini<br>
-            ⚡ Hormuz open → Energi, Shipping, Petrokimia
+            ⚡ Hormuz open → Energi, Shipping, Petrokimia<br>
+            🛡️ Beta analysis → sektor mana yang tahan banting
           </div>
         </div>""", unsafe_allow_html=True)
 
