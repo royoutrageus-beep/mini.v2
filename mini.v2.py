@@ -556,7 +556,174 @@ def score_bsjp(r, p, p2):
 
     return max(0,min(6,round(score,1))), reasons, {}
 
-tab_scanner, tab_watchlist, tab_bsjp, tab_backtest = st.tabs(["🔥 Scanner Intraday","👁️ Watchlist Analyzer","🌙 BSJP","📊 Backtest"])
+
+# ════════════════════════════════════════════════════
+#  SEKTOR IDX — MAPPING & ROTATION
+# ════════════════════════════════════════════════════
+SECTORS = {
+    "Energi & Mining":    ["ADRO","BYAN","ITMG","PTBA","HRUM","DOID","GEMS","PGAS","ELSA","MEDC","ESSA","AKRA","RIGS","DSSA","MBAP","KKGI","MYOH","SMMT","BSSR","INDY"],
+    "Perbankan":          ["BBCA","BBRI","BMRI","BBNI","BBTN","BJBR","BJTM","BNGA","BDMN","NISP","MEGA","BBYB","ARTO","BRIS","AGRO","BBHI","NOBU","PNBN","BACA","MAYA"],
+    "Properti":           ["BSDE","CTRA","SMRA","LPKR","PWON","APLN","ASRI","DILD","DUTI","MDLN","MKPI","JRPT","KIJA","BEST","GPRA","NUSA","DART","CITY","BKSL","MTLA"],
+    "Infrastruktur":      ["JSMR","TLKM","EXCL","ISAT","TBIG","TOWR","WIKA","ADHI","PTPP","WSKT","WTON","WEGE","ACST","DGIK","TRUK","BIRD","GIAA","TMAS","SMDR","BBRM"],
+    "Konsumer":           ["UNVR","ICBP","INDF","MYOR","KLBF","SIDO","GGRM","HMSP","ULTJ","DLTA","ROTI","SKBM","GOOD","HOKI","CLEO","MIKA","HEAL","SILO","KAEF","DVLA"],
+    "Industri & Otomotif":["ASII","AUTO","SMSM","HEXA","UNTR","SCCO","KBLI","VOKS","BRAM","GJTL","IMAS","INTP","SMGR","AMFG","LION","CPIN","JPFA","MAIN","BRPT","TPIA"],
+    "Teknologi":          ["GOTO","BUKA","EMTK","MNCN","SCMA","MTEL","MTDL","MLPT","CHIP","LUCK","NFCX","DCII","WIFI","DIGI","AWAN","AXIO","INET","MCAS","WIRG","TECH"],
+    "Shipping & Logistik":["TMAS","SMDR","BBRM","NELY","AKSI","SHIP","ELPI","BIRD","GIAA","TAXI","ASSA","WEHA","SAFE","ATLI","MIRA","HEXA","RAJA","RIGS","MBSS","IATA"],
+    "Petrokimia & Kimia": ["TPIA","BRPT","BUDI","EKAD","INCI","DPNS","ETWA","MDKI","ESSA","AKPI","ADMG","CPRO","SRSN","MOLI","PURA","CEKA","KBLM","JPFA","CPIN","UNIC"],
+}
+
+# Hormuz-sensitive sectors (benefited dari Hormuz open)
+HORMUZ_SECTORS = ["Energi & Mining", "Shipping & Logistik", "Petrokimia & Kimia"]
+
+@st.cache_data(ttl=300)
+def fetch_sector_rotation(sector_stocks):
+    """Fetch daily data untuk sektor rotation — perubahan % hari ini."""
+    results = []
+    tickers_yf = [s+".JK" for s in sector_stocks[:10]]  # top 10 per sektor
+    try:
+        raw = yf.download(tickers_yf, period="3d", interval="1d",
+                          group_by="ticker", progress=False,
+                          threads=True, auto_adjust=True)
+        for t in tickers_yf:
+            tkr = t.replace(".JK","")
+            try:
+                if len(tickers_yf) > 1:
+                    df = raw[t].dropna()
+                else:
+                    df = raw.copy()
+                    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+                    df = df.dropna()
+                if len(df) < 2: continue
+                close  = float(df["Close"].iloc[-1])
+                prev   = float(df["Close"].iloc[-2])
+                chg    = (close - prev) / prev * 100
+                vol    = float(df["Volume"].iloc[-1])
+                avg_v  = float(df["Volume"].mean())
+                rvol   = vol / avg_v if avg_v > 0 else 1.0
+                results.append({"ticker":tkr,"close":close,"chg":chg,"rvol":round(rvol,2)})
+            except: pass
+    except: pass
+    return results
+
+# ════════════════════════════════════════════════════
+#  GAP UP SCANNER
+# ════════════════════════════════════════════════════
+@st.cache_data(ttl=300)
+def scan_gap_up(tickers_yf, min_gap_pct=0.5):
+    """
+    Detect kandidat Gap Up besok pagi:
+    - Close hari ini > High kemarin (gap confirmed)
+    - ATAU Close mendekati High hari ini (potential gap up)
+    - Volume surge sore hari
+    """
+    results = []
+    for i in range(0, len(tickers_yf), 30):
+        batch = tickers_yf[i:i+30]
+        try:
+            raw = yf.download(batch, period="5d", interval="1d",
+                              group_by="ticker", progress=False,
+                              threads=True, auto_adjust=True)
+            for t in batch:
+                tkr = t.replace(".JK","")
+                try:
+                    if len(batch) > 1:
+                        df = raw[t].dropna()
+                    else:
+                        df = raw.copy()
+                        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+                        df = df.dropna()
+                    if len(df) < 3: continue
+
+                    today  = df.iloc[-1]
+                    prev   = df.iloc[-2]
+
+                    close   = float(today["Close"])
+                    high_t  = float(today["High"])
+                    low_t   = float(today["Low"])
+                    high_p  = float(prev["High"])
+                    vol     = float(today["Volume"])
+                    avg_vol = float(df["Volume"].mean())
+                    rvol    = vol / avg_vol if avg_vol > 0 else 1.0
+
+                    # Gap score
+                    gap_score = 0
+                    reasons   = []
+
+                    # 1. Close di atas High kemarin = gap confirmed
+                    if close > high_p:
+                        gap_pct = (close - high_p) / high_p * 100
+                        gap_score += 3
+                        reasons.append(f"Gap {gap_pct:.1f}% above prev High ✦✦")
+
+                    # 2. Close mendekati High hari ini (>85%) = potential gap
+                    close_ratio = (close - low_t) / max(high_t - low_t, 1)
+                    if close_ratio > 0.85:
+                        gap_score += 2
+                        reasons.append(f"Tutup dekat High {close_ratio:.0%}")
+                    elif close_ratio > 0.70:
+                        gap_score += 1
+                        reasons.append(f"Tutup kuat {close_ratio:.0%}")
+
+                    # 3. Volume surge
+                    if rvol > 3.0:   gap_score += 2; reasons.append(f"RVOL={rvol:.1f}x SURGE 🔥")
+                    elif rvol > 2.0: gap_score += 1; reasons.append(f"RVOL={rvol:.1f}x")
+                    elif rvol > 1.5: gap_score += 0.5
+
+                    # 4. Trend harian naik
+                    if len(df) >= 3:
+                        chg3 = (close - float(df.iloc[-3]["Close"])) / float(df.iloc[-3]["Close"]) * 100
+                        if chg3 > 3:    gap_score += 1; reasons.append(f"3D ROC +{chg3:.1f}%")
+                        elif chg3 > 1:  gap_score += 0.5
+
+                    if gap_score < 3: continue
+
+                    chg_today = (close - float(prev["Close"])) / float(prev["Close"]) * 100
+                    results.append({
+                        "Ticker": tkr, "Price": int(close),
+                        "Gap Score": round(gap_score,1),
+                        "Chg %": round(chg_today,2),
+                        "Close Ratio": round(close_ratio,2),
+                        "RVOL": round(rvol,2),
+                        "Prev High": int(high_p),
+                        "Signal": "GAP UP 🚀" if gap_score>=4 else "POTENTIAL ⚡",
+                        "Reasons": " · ".join(reasons[:3])
+                    })
+                except: pass
+        except: pass
+        time.sleep(0.3)
+    return sorted(results, key=lambda x: x["Gap Score"], reverse=True)
+
+# ════════════════════════════════════════════════════
+#  TRAILING STOP ENGINE
+# ════════════════════════════════════════════════════
+def calc_trailing_stop(entry, current, atr, method="ATR", atr_mult=2.0, pct=3.0):
+    """
+    Hitung trailing stop berdasarkan metode pilihan.
+    Returns: stop_price, profit_locked, trail_distance
+    """
+    if method == "ATR":
+        trail_dist  = atr * atr_mult
+        stop_price  = current - trail_dist
+    elif method == "Persen":
+        trail_dist  = current * (pct/100)
+        stop_price  = current * (1 - pct/100)
+    else:  # Swing Low
+        trail_dist  = atr * 1.5
+        stop_price  = current - trail_dist
+
+    profit_locked = max(0, stop_price - entry)
+    profit_pct    = (current - entry) / entry * 100
+    locked_pct    = (stop_price - entry) / entry * 100 if stop_price > entry else 0
+
+    return {
+        "stop":     round(stop_price, 0),
+        "distance": round(trail_dist, 0),
+        "profit_float": round(profit_pct, 2),
+        "profit_locked": round(locked_pct, 2),
+        "is_profitable": stop_price > entry
+    }
+
+tab_scanner, tab_watchlist, tab_bsjp, tab_sector, tab_gapup, tab_trail, tab_backtest = st.tabs(["🔥 Scanner","👁️ Watchlist","🌙 BSJP","🏭 Sektor","📈 Gap Up","🎯 Trailing Stop","📊 Backtest"])
 
 # ════════════════════════════════════════════════════
 #  TAB 1: SCANNER
@@ -1188,7 +1355,344 @@ with tab_bsjp:
         </div>""", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════
-#  TAB 4: BACKTEST
+#  TAB 4: SEKTOR ROTATION
+# ════════════════════════════════════════════════════
+with tab_sector:
+    st.markdown("""
+    <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;
+         padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #ff7b00;">
+      Track pergerakan tiap sektor IDX hari ini. Sektor merah = hindari, hijau = fokus di sana.
+      <br>⚡ <b style="color:#ffb700">Hormuz-sensitive:</b> Energi, Shipping, Petrokimia
+    </div>""", unsafe_allow_html=True)
+
+    do_sector = st.button("🏭 REFRESH SEKTOR", type="primary", use_container_width=True, key="btn_sector")
+
+    if "sector_data" not in st.session_state: st.session_state.sector_data = {}
+
+    if do_sector:
+        with st.spinner("Mengambil data sektor..."):
+            sec_data = {}
+            for sec_name, sec_stocks in SECTORS.items():
+                results = fetch_sector_rotation(sec_stocks)
+                if results:
+                    avg_chg  = sum(r["chg"]  for r in results) / len(results)
+                    avg_rvol = sum(r["rvol"] for r in results) / len(results)
+                    bullish  = sum(1 for r in results if r["chg"] > 0)
+                    sec_data[sec_name] = {
+                        "avg_chg": round(avg_chg,2), "avg_rvol": round(avg_rvol,2),
+                        "bullish": bullish, "total": len(results),
+                        "stocks": results, "is_hormuz": sec_name in HORMUZ_SECTORS
+                    }
+            st.session_state.sector_data = sec_data
+
+    if st.session_state.sector_data:
+        # Sort by avg_chg
+        sorted_secs = sorted(st.session_state.sector_data.items(),
+                             key=lambda x: x[1]["avg_chg"], reverse=True)
+
+        # Summary heatmap
+        st.markdown('<div class="section-title">Sektor Heatmap Hari Ini</div>', unsafe_allow_html=True)
+        cols_sec = st.columns(3)
+        for idx, (sec_name, sec_info) in enumerate(sorted_secs):
+            chg  = sec_info["avg_chg"]
+            col  = "#00ff88" if chg > 1 else "#ffb700" if chg > 0 else "#ff3d5a"
+            bg   = "rgba(0,255,136,.06)" if chg>1 else "rgba(255,183,0,.06)" if chg>0 else "rgba(255,61,90,.06)"
+            bdr  = col+"44"
+            hormuz_badge = ' <span style="color:#ffb700;font-size:9px">⚡HORMUZ</span>' if sec_info["is_hormuz"] else ""
+            bull_pct = int(sec_info["bullish"]/max(sec_info["total"],1)*100)
+            with cols_sec[idx % 3]:
+                st.markdown(f"""
+                <div style="background:{bg};border:1px solid {bdr};border-radius:8px;
+                     padding:12px;margin-bottom:10px;">
+                  <div style="font-family:Space Mono,monospace;font-size:10px;font-weight:700;
+                               color:#c9d1d9;">{sec_name}{hormuz_badge}</div>
+                  <div style="font-family:Space Mono,monospace;font-size:22px;font-weight:700;
+                               color:{col};margin:4px 0;">{chg:+.2f}%</div>
+                  <div style="font-size:9px;color:#4a5568;">
+                    RVOL avg: {sec_info['avg_rvol']:.1f}x &nbsp;·&nbsp;
+                    Bullish: {sec_info['bullish']}/{sec_info['total']} ({bull_pct}%)
+                  </div>
+                  <div style="height:4px;background:#1c2533;border-radius:2px;margin-top:6px;overflow:hidden;">
+                    <div style="width:{bull_pct}%;height:100%;background:{col};border-radius:2px;"></div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+        # Top picks per sektor terbaik
+        st.markdown('<div class="section-title">Top Saham Per Sektor Terkuat</div>', unsafe_allow_html=True)
+        top3_secs = sorted_secs[:3]
+        cols_top = st.columns(3)
+        for cidx, (sec_name, sec_info) in enumerate(top3_secs):
+            with cols_top[cidx]:
+                chg   = sec_info["avg_chg"]
+                col   = "#00ff88" if chg > 0 else "#ff3d5a"
+                st.markdown(f'<div style="font-family:Space Mono,monospace;font-size:11px;color:{col};font-weight:700;margin-bottom:8px;">{sec_name}</div>', unsafe_allow_html=True)
+                for stk in sorted(sec_info["stocks"], key=lambda x: x["chg"], reverse=True)[:5]:
+                    sc = "#00ff88" if stk["chg"]>0 else "#ff3d5a"
+                    st.markdown(f"""
+                    <div style="display:flex;justify-content:space-between;padding:5px 0;
+                         border-bottom:1px solid #1c2533;font-family:Space Mono,monospace;font-size:10px;">
+                      <span style="color:#c9d1d9;">{stk['ticker']}</span>
+                      <span style="color:{sc}">{stk['chg']:+.1f}%</span>
+                      <span style="color:#4a5568;">RVOL {stk['rvol']}x</span>
+                    </div>""", unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;">
+          <div style="font-size:32px;margin-bottom:12px;">🏭</div>
+          <div style="font-size:12px;letter-spacing:2px;">KLIK REFRESH SEKTOR</div>
+          <div style="font-size:10px;margin-top:8px;color:#2d3748;">
+            Track sektor mana yang paling hot hari ini<br>
+            ⚡ Hormuz open → Energi, Shipping, Petrokimia
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+# ════════════════════════════════════════════════════
+#  TAB 5: GAP UP SCANNER
+# ════════════════════════════════════════════════════
+with tab_gapup:
+    st.markdown("""
+    <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;
+         padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #00ff88;">
+      Deteksi saham yang berpotensi <b style="color:#00ff88">Gap Up besok pagi</b> (09:00-10:00 WIB).<br>
+      Entry terbaik: sore hari sebelum close, atau esok pagi sebelum gap terkonfirmasi.
+    </div>""", unsafe_allow_html=True)
+
+    gu_c1, gu_c2 = st.columns(2)
+    with gu_c1:
+        gu_min_score = st.slider("Min Gap Score", 1, 6, 3, key="gu_score")
+    with gu_c2:
+        gu_quick = st.toggle("⚡ Quick Scan (200)", value=True, key="gu_quick")
+
+    do_gapup = st.button("📈 SCAN GAP UP SEKARANG", type="primary", use_container_width=True, key="btn_gapup")
+
+    if "gapup_results" not in st.session_state: st.session_state.gapup_results = []
+
+    if do_gapup:
+        scan_tickers = stocks_yf[:200] if gu_quick else stocks_yf
+        with st.spinner(f"Scanning {len(scan_tickers)} saham untuk Gap Up..."):
+            gu_res = scan_gap_up(scan_tickers)
+            gu_res = [r for r in gu_res if r["Gap Score"] >= gu_min_score]
+            st.session_state.gapup_results = gu_res
+
+        if gu_res and TOKEN and CHAT_ID:
+            now_g = datetime.now(jakarta_tz)
+            sep = "━"*28
+            msg = f"📈 *GAP UP SCANNER*\n⏰ `{now_g.strftime('%H:%M:%S')} WIB`\n{sep}\n"
+            for r in gu_res[:5]:
+                msg += (f"\n🚀 *{r['Ticker']}* `{r['Signal']}`\n"
+                        f"   💰 Price: `{r['Price']:,}` ({r['Chg %']:+.1f}%)\n"
+                        f"   📊 Gap Score: `{r['Gap Score']}/6`\n"
+                        f"   🌊 RVOL: `{r['RVOL']}x` | Prev High: `{r['Prev High']:,}`\n"
+                        f"   💡 _{r['Reasons'][:50]}_\n")
+            msg += f"\n{sep}\n📈 _Gap Up Scanner · Entry besok pagi_\n⚠️ _BUKAN saran investasi!_"
+            try:
+                requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                              data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"Markdown"}, timeout=10)
+                st.success("📡 Gap Up alert terkirim ke Telegram!")
+            except: pass
+
+    gapup_res = st.session_state.gapup_results
+    if gapup_res:
+        gap_confirmed = [r for r in gapup_res if "GAP UP" in r.get("Signal","")]
+        potential     = [r for r in gapup_res if "POTENTIAL" in r.get("Signal","")]
+
+        st.markdown(f"""
+        <div class="metric-row">
+          <div class="metric-card green"><div class="metric-label">Gap Confirmed 🚀</div>
+            <div class="metric-value">{len(gap_confirmed)}</div></div>
+          <div class="metric-card amber"><div class="metric-label">Potential ⚡</div>
+            <div class="metric-value">{len(potential)}</div></div>
+          <div class="metric-card"><div class="metric-label">Total</div>
+            <div class="metric-value">{len(gapup_res)}</div></div>
+        </div>""", unsafe_allow_html=True)
+
+        # Cards
+        gu_html = '<div class="signal-grid">'
+        for row in gapup_res[:20]:
+            sc_int = int(min(row["Gap Score"],6))
+            bars   = ''.join([f'<div class="sc-bar {"filled" if i<sc_int else "empty"}" style="width:26px"></div>' for i in range(6)])
+            is_gap = "GAP UP" in row.get("Signal","")
+            sc_col = "#00ff88" if is_gap else "#ffb700"
+            chg_c  = "#00ff88" if row["Chg %"]>0 else "#ff3d5a"
+            gu_html += f"""<div class="signal-card {'gacor' if is_gap else 'potensial'}">
+              <div style="display:flex;justify-content:space-between;">
+                <div>
+                  <div class="sc-ticker">{row['Ticker']}</div>
+                  <div class="sc-price" style="color:{chg_c}">{row['Price']:,} ({row['Chg %']:+.1f}%)</div>
+                </div>
+                <div style="text-align:right">
+                  <div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568">GAP SCORE</div>
+                  <div style="font-family:Space Mono,monospace;font-size:22px;font-weight:700;color:{sc_col}">{row['Gap Score']}</div>
+                </div>
+              </div>
+              <div class="sc-signal" style="color:{sc_col}">{row['Signal']}</div>
+              <div class="sc-bars">{bars}</div>
+              <div class="sc-stats">
+                <div class="sc-stat">RVOL <span>{row['RVOL']}x</span></div>
+                <div class="sc-stat">Close% <span>{row['Close Ratio']:.0%}</span></div>
+                <div class="sc-stat">PrevHigh <span>{row['Prev High']:,}</span></div>
+              </div>
+              <div style="margin-top:8px;font-size:10px;color:#4a5568;font-family:Space Mono,monospace;">{row['Reasons'][:80]}</div>
+            </div>"""
+        gu_html += '</div>'
+        st.markdown(gu_html, unsafe_allow_html=True)
+
+        df_gu = pd.DataFrame(gapup_res)
+        st.dataframe(df_gu, width='stretch', hide_index=True,
+                     column_config={"Gap Score": st.column_config.ProgressColumn("Gap Score",min_value=0,max_value=6,format="%.1f"),
+                                    "RVOL": st.column_config.NumberColumn("RVOL",format="%.2fx"),
+                                    "Chg %": st.column_config.NumberColumn("Chg %",format="%.2f%%")})
+    elif not do_gapup:
+        st.markdown("""
+        <div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;">
+          <div style="font-size:32px;margin-bottom:12px;">📈</div>
+          <div style="font-size:12px;letter-spacing:2px;">KLIK SCAN GAP UP</div>
+          <div style="font-size:10px;margin-top:8px;color:#2d3748;">
+            Best run: sore hari 14:00–16:00 WIB<br>
+            Hasil = kandidat gap up besok pagi 🚀
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+# ════════════════════════════════════════════════════
+#  TAB 6: TRAILING STOP ENGINE
+# ════════════════════════════════════════════════════
+with tab_trail:
+    st.markdown("""
+    <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;
+         padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #bf5fff;">
+      Lock profit di market bullish. Trailing Stop otomatis ikut harga naik — tidak turun.<br>
+      <b style="color:#ffb700">Tips:</b> Pakai ATR 2x untuk scalping, 3x untuk swing/BSJP.
+    </div>""", unsafe_allow_html=True)
+
+    tr_c1, tr_c2 = st.columns(2)
+    with tr_c1:
+        st.markdown('<div class="settings-label">POSISI LO</div>', unsafe_allow_html=True)
+        tr_ticker  = st.text_input("Ticker (tanpa .JK)", value="BBCA", key="tr_ticker").upper()
+        tr_entry   = st.number_input("Harga Entry (Rp)", value=9000, step=10, key="tr_entry")
+        tr_qty     = st.number_input("Jumlah Lot", value=10, step=1, key="tr_qty")
+
+    with tr_c2:
+        st.markdown('<div class="settings-label">SETTING TRAILING</div>', unsafe_allow_html=True)
+        tr_method  = st.radio("Metode", ["ATR","Persen","Swing Low"], key="tr_method")
+        if tr_method == "ATR":
+            tr_atr_mult = st.slider("ATR Multiplier", 1.0, 5.0, 2.0, 0.5, key="tr_atr_m")
+        elif tr_method == "Persen":
+            tr_pct = st.slider("Trailing %", 1.0, 10.0, 3.0, 0.5, key="tr_pct")
+        tr_alert = st.toggle("🔔 Alert Telegram saat kena Stop", value=True, key="tr_alert")
+
+    if st.button("🎯 HITUNG TRAILING STOP", type="primary", use_container_width=True, key="btn_trail"):
+        with st.spinner(f"Fetch data {tr_ticker}..."):
+            try:
+                raw_tr = yf.download(tr_ticker+".JK", period="5d", interval="15m",
+                                     progress=False, auto_adjust=True, threads=False)
+                if not raw_tr.empty:
+                    if isinstance(raw_tr.columns, pd.MultiIndex): raw_tr.columns = raw_tr.columns.droplevel(1)
+                    df_tr = apply_intraday_indicators(raw_tr.dropna())
+                    current = float(df_tr["Close"].iloc[-1])
+                    atr_val = float(df_tr["ATR"].iloc[-1])
+
+                    if tr_method == "ATR":
+                        trail_result = calc_trailing_stop(tr_entry, current, atr_val, "ATR", tr_atr_mult)
+                    elif tr_method == "Persen":
+                        trail_result = calc_trailing_stop(tr_entry, current, atr_val, "Persen", pct=tr_pct)
+                    else:
+                        trail_result = calc_trailing_stop(tr_entry, current, atr_val, "Swing Low")
+
+                    stop      = trail_result["stop"]
+                    dist      = trail_result["distance"]
+                    p_float   = trail_result["profit_float"]
+                    p_locked  = trail_result["profit_locked"]
+                    is_profit = trail_result["is_profitable"]
+
+                    lot_val   = tr_qty * 100  # 1 lot = 100 lembar
+                    profit_rp = (current - tr_entry) * lot_val
+                    locked_rp = max(0, (stop - tr_entry) * lot_val)
+
+                    stop_col   = "#00ff88" if is_profit else "#ff3d5a"
+                    profit_col = "#00ff88" if profit_rp >= 0 else "#ff3d5a"
+
+                    st.markdown(f"""
+                    <div style="background:#0d1117;border:1px solid {stop_col}44;border-radius:10px;padding:20px;margin-top:12px;">
+                      <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;letter-spacing:2px;margin-bottom:16px;">
+                        {tr_ticker} · {tr_method} · Entry {tr_entry:,}
+                      </div>
+                      <div class="metric-row">
+                        <div class="metric-card"><div class="metric-label">Harga Sekarang</div>
+                          <div class="metric-value" style="color:#00e5ff">{int(current):,}</div>
+                          <div class="metric-sub">ATR: {int(atr_val)}</div></div>
+                        <div class="metric-card" style="border-top-color:{stop_col}">
+                          <div class="metric-label">🎯 Trailing Stop</div>
+                          <div class="metric-value" style="color:{stop_col}">{int(stop):,}</div>
+                          <div class="metric-sub">Jarak: {int(dist):,}</div></div>
+                        <div class="metric-card" style="border-top-color:{profit_col}">
+                          <div class="metric-label">Profit Float</div>
+                          <div class="metric-value" style="color:{profit_col}">{p_float:+.1f}%</div>
+                          <div class="metric-sub">Rp {profit_rp:,.0f}</div></div>
+                        <div class="metric-card" style="border-top-color:#00ff88">
+                          <div class="metric-label">Profit Terkunci 🔒</div>
+                          <div class="metric-value" style="color:#00ff88">{p_locked:+.1f}%</div>
+                          <div class="metric-sub">Rp {locked_rp:,.0f}</div></div>
+                      </div>
+                      <div style="margin-top:14px;padding:12px;background:rgba(0,0,0,.3);border-radius:6px;">
+                        <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:8px;">PRICE MAP</div>
+                        <div style="position:relative;height:16px;background:#1c2533;border-radius:8px;overflow:hidden;">
+                          {"" if current == tr_entry else f'<div style="position:absolute;left:{min(99,max(1,int((tr_entry-stop)/(current-stop)*100 if current!=stop else 50)))}%;width:2px;height:100%;background:#4a5568;"></div>'}
+                          <div style="position:absolute;left:{min(99,max(1,int((stop/(max(current,stop+1)*1.05))*100)))}%;width:3px;height:100%;background:{stop_col};"></div>
+                          <div style="width:{min(100,int((current/max(current*1.05,1))*100))}%;height:100%;background:linear-gradient(90deg,{stop_col},{profit_col});border-radius:8px;opacity:.6;"></div>
+                        </div>
+                        <div style="display:flex;justify-content:space-between;font-family:Space Mono,monospace;font-size:9px;color:#4a5568;margin-top:4px;">
+                          <span>Stop {int(stop):,}</span>
+                          <span>Entry {tr_entry:,}</span>
+                          <span>Now {int(current):,}</span>
+                        </div>
+                      </div>
+                      <div style="margin-top:12px;font-family:Space Mono,monospace;font-size:10px;color:#4a5568;line-height:1.8;">
+                        💼 {tr_qty} lot ({lot_val:,} lembar) &nbsp;·&nbsp;
+                        {'✅ Profit sudah terkunci!' if is_profit else '⚠️ Stop masih di bawah entry'}
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+
+                    # Save state for alert
+                    st.session_state["trail_stop"] = {"ticker":tr_ticker,"stop":stop,"current":current,"entry":tr_entry}
+
+                    if tr_alert and TOKEN and CHAT_ID:
+                        now_tr = datetime.now(jakarta_tz)
+                        msg_tr = (f"🎯 *TRAILING STOP UPDATE*\n"
+                                  f"⏰ `{now_tr.strftime('%H:%M:%S')} WIB`\n{'━'*28}\n"
+                                  f"📌 *{tr_ticker}* | Metode: {tr_method}\n"
+                                  f"💰 Entry: `{tr_entry:,}` → Now: `{int(current):,}`\n"
+                                  f"🎯 Trailing Stop: `{int(stop):,}`\n"
+                                  f"🔒 Profit terkunci: `{p_locked:+.1f}%` (Rp {locked_rp:,.0f})\n"
+                                  f"📊 Float P&L: `{p_float:+.1f}%` (Rp {profit_rp:,.0f})\n"
+                                  f"{'━'*28}\n⚠️ _BUKAN saran investasi!_")
+                        try:
+                            requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                                          data={"chat_id":CHAT_ID,"text":msg_tr,"parse_mode":"Markdown"}, timeout=10)
+                            st.success("📡 Trailing stop terkirim ke Telegram!")
+                        except: pass
+                else:
+                    st.error(f"Data {tr_ticker} tidak tersedia")
+            except Exception as ex:
+                st.error(f"Error: {str(ex)[:80]}")
+
+    # Trailing Stop guide
+    with st.expander("📖 Cara Pakai Trailing Stop", expanded=False):
+        st.markdown("""
+        <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;line-height:2;">
+          <b style="color:#c9d1d9">ATR 2x</b> → Scalping 15M, tight trailing<br>
+          <b style="color:#c9d1d9">ATR 3x</b> → Swing / BSJP, lebih longgar<br>
+          <b style="color:#c9d1d9">Persen 3%</b> → Simple, mudah dipahami<br>
+          <b style="color:#c9d1d9">Swing Low</b> → Berdasarkan struktur harga<br>
+          <br>
+          <b style="color:#ffb700">Tips Market Bullish:</b><br>
+          • Biarkan profit berjalan, geser stop seiring naik<br>
+          • Jangan close profit terlalu cepat di trend naik<br>
+          • Lock 50% posisi di TP1, biarkan 50% lanjut<br>
+          • ATR multiplier lebih besar = stop lebih longgar
+        </div>""", unsafe_allow_html=True)
+
+# ════════════════════════════════════════════════════
+#  TAB 7: BACKTEST
 # ════════════════════════════════════════════════════
 with tab_backtest:
     st.markdown('<div class="section-title">Backtest Engine · 15M Intraday</div>', unsafe_allow_html=True)
