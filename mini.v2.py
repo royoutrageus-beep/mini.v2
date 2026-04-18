@@ -429,7 +429,134 @@ st.markdown(f"""
 # ════════════════════════════════════════════════════
 #  TABS
 # ════════════════════════════════════════════════════
-tab_scanner, tab_watchlist, tab_backtest = st.tabs(["🔥 Scanner Intraday","👁️ Watchlist Analyzer","📊 Backtest"])
+
+# ════════════════════════════════════════════════════
+#  PIVOT POINTS — Classic Floor Trader Formula
+# ════════════════════════════════════════════════════
+def calc_pivot_points(high, low, close):
+    """Hitung pivot points harian dari H/L/C kemarin."""
+    pp = (high + low + close) / 3
+    r1 = 2*pp - low
+    r2 = pp + (high - low)
+    r3 = high + 2*(pp - low)
+    s1 = 2*pp - high
+    s2 = pp - (high - low)
+    s3 = low - 2*(high - pp)
+    return {"PP":pp,"R1":r1,"R2":r2,"R3":r3,"S1":s1,"S2":s2,"S3":s3}
+
+@st.cache_data(ttl=3600)
+def fetch_pivot_data(ticker_yf):
+    """Fetch daily data untuk pivot point calculation."""
+    try:
+        df = yf.download(ticker_yf, period="5d", interval="1d",
+                         progress=False, auto_adjust=True, threads=False)
+        if df is None or len(df) < 2: return None
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+        prev = df.iloc[-2]  # kemarin
+        return calc_pivot_points(float(prev["High"]), float(prev["Low"]), float(prev["Close"]))
+    except: return None
+
+def get_pivot_position(price, pivots):
+    """Tentukan posisi price relatif terhadap pivot."""
+    if pivots is None: return "Unknown", "#4a5568"
+    pp = pivots["PP"]
+    if price > pivots["R2"]:   return "Above R2 🔴", "#ff3d5a"
+    elif price > pivots["R1"]: return "R1→R2 🟠",   "#ff7b00"
+    elif price > pp:           return "PP→R1 🟢",   "#00ff88"
+    elif price > pivots["S1"]: return "S1→PP 🟡",   "#ffb700"
+    elif price > pivots["S2"]: return "S2→S1 🔴",   "#ff3d5a"
+    else:                      return "Below S2 🔴", "#ff3d5a"
+
+# ════════════════════════════════════════════════════
+#  MULTI-TIMEFRAME SCORE
+# ════════════════════════════════════════════════════
+@st.cache_data(ttl=360)
+def fetch_mtf_data(ticker_yf):
+    """Fetch 15M + 1H + 1D untuk MTF analysis."""
+    result = {}
+    for interval, period, key in [("15m","3d","M15"), ("1h","10d","H1"), ("1d","60d","D1")]:
+        try:
+            df = yf.download(ticker_yf, period=period, interval=interval,
+                             progress=False, auto_adjust=True, threads=False)
+            if df is not None and not df.empty:
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+                df = df.dropna()
+                if len(df) >= 20: result[key] = df
+        except: pass
+    return result
+
+def score_mtf(ticker_yf, mode="Scalping ⚡"):
+    """Hitung score per timeframe dan gabungkan."""
+    mtf = fetch_mtf_data(ticker_yf)
+    scores = {}
+    for tf_key, df in mtf.items():
+        try:
+            df = apply_intraday_indicators(df.copy())
+            if len(df) < 3: continue
+            r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3]
+            if mode=="Scalping ⚡":   sc,_,_=score_scalping(r,p,p2)
+            elif mode=="Momentum 🚀": sc,_,_=score_momentum(r,p,p2)
+            else:                     sc,_,_=score_reversal(r,p,p2)
+            scores[tf_key] = round(sc, 1)
+        except: scores[tf_key] = 0
+    return scores
+
+def mtf_alignment(scores):
+    """Cek apakah semua TF align bullish."""
+    if not scores: return "No Data", "#4a5568", 0
+    vals = list(scores.values())
+    avg  = sum(vals)/len(vals)
+    bullish_count = sum(1 for v in vals if v >= 4)
+    if bullish_count == len(vals):  return "FULL ALIGN 🔥", "#00ff88", avg
+    elif bullish_count >= 2:        return "PARTIAL ⚡",    "#ffb700", avg
+    elif bullish_count == 1:        return "MIXED ⚠️",      "#ff7b00", avg
+    else:                           return "NO ALIGN ❌",   "#ff3d5a", avg
+
+# ════════════════════════════════════════════════════
+#  BSJP — BELI SORE JUAL PAGI
+#  Entry: 14:30–15:45 WIB | Exit: besok 09:00–10:00
+# ════════════════════════════════════════════════════
+def score_bsjp(r, p, p2):
+    """
+    Scoring khusus BSJP — fokus momentum closing + overnight gap potential.
+    Beda dari scalping: lebih weight ke trend harian & volume surge closing.
+    """
+    score=0; reasons=[]
+    # 1. Closing strength — tutup mendekati high harian
+    body   = float(r["Close"]) - float(r["Open"])
+    hi_lo  = float(r["High"])  - float(r["Low"])
+    close_pct = (float(r["Close"]) - float(r["Low"])) / max(hi_lo, 1)
+    if close_pct > 0.7:  score+=2;   reasons.append(f"Tutup dekat High ({close_pct:.0%})")
+    elif close_pct > 0.5: score+=1;  reasons.append(f"Tutup kuat ({close_pct:.0%})")
+
+    # 2. Volume surge sore hari = sinyal akumulasi
+    rvol = float(r["RVOL"])
+    if rvol > 3.0:   score+=2;   reasons.append(f"RVOL={rvol:.1f}x SURGE 🔥")
+    elif rvol > 2.0: score+=1.5; reasons.append(f"RVOL={rvol:.1f}x kuat")
+    elif rvol > 1.5: score+=0.8; reasons.append(f"RVOL={rvol:.1f}x")
+
+    # 3. EMA trend alignment
+    if r["EMA9"]>r["EMA21"]>r["EMA50"]:  score+=1.5; reasons.append("EMA stack ▲")
+    elif r["EMA9"]>r["EMA21"]:            score+=0.8; reasons.append("EMA9>21")
+
+    # 4. RSI tidak overbought (jangan beli yang udah tinggi banget)
+    rsi_e = float(r["RSI_EMA"])
+    if 45<rsi_e<70:  score+=1;   reasons.append(f"RSI-EMA={rsi_e:.1f} ✓")
+    elif rsi_e>=70:  score-=1;   reasons.append(f"RSI-EMA={rsi_e:.1f} OB ⚠️")
+    elif rsi_e<40:   score+=0.5; reasons.append(f"RSI-EMA={rsi_e:.1f} oversold")
+
+    # 5. MACD positif
+    if float(r["MACD_Hist"])>0 and float(r["MACD_Hist"])>float(p["MACD_Hist"]):
+        score+=1; reasons.append("MACD hist expanding ✦")
+    elif float(r["MACD_Hist"])>0:
+        score+=0.5; reasons.append("MACD +")
+
+    # 6. Above VWAP = bandar masih akumulasi
+    if float(r["Close"])>float(r["VWAP"]): score+=0.5; reasons.append("Above VWAP")
+
+    return max(0,min(6,round(score,1))), reasons, {}
+
+tab_scanner, tab_watchlist, tab_bsjp, tab_backtest = st.tabs(["🔥 Scanner Intraday","👁️ Watchlist Analyzer","🌙 BSJP","📊 Backtest"])
 
 # ════════════════════════════════════════════════════
 #  TAB 1: SCANNER
@@ -610,6 +737,14 @@ with tab_scanner:
                     <div class="sc-stat">R:R <span>{row['R:R']}</span></div>
                   </div>
                   <div style="margin-top:8px;font-size:10px;color:#4a5568;line-height:1.4;font-family:Space Mono,monospace;">{row['Reasons'][:70]}</div>
+                  <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;">
+                    <div style="font-family:Space Mono,monospace;font-size:9px;padding:2px 8px;border-radius:10px;background:rgba(0,0,0,.3);color:#4a5568;">
+                      📍 {row.get('Pivot Pos','-')}
+                    </div>
+                    <div style="font-family:Space Mono,monospace;font-size:9px;padding:2px 8px;border-radius:10px;background:rgba(0,0,0,.3);color:#4a5568;">
+                      PP {row.get('PP',0):,} · R1 {row.get('R1',0):,} · S1 {row.get('S1',0):,}
+                    </div>
+                  </div>
                 </div>"""
             card_html+='</div>'
             st.markdown(card_html, unsafe_allow_html=True)
@@ -680,13 +815,24 @@ with tab_watchlist:
                         sig=get_signal(sc,wl_mode); rr=(tp-close)/max(close-sl,0.01)
                         e9=float(r['EMA9']); e21=float(r['EMA21']); e50=float(r['EMA50'])
                         trend="▲ UP" if e9>e21>e50 else("▼ DOWN" if e9<e21<e50 else "◆ SIDE")
+                        # Pivot + MTF untuk watchlist
+                        _wl_pvt = fetch_pivot_data(t+".JK")
+                        _wl_pvt_pos = get_pivot_position(close, _wl_pvt)[0] if _wl_pvt else "-"
+                        _wl_mtf = score_mtf(t+".JK", mode=wl_mode)
+                        _wl_align, _wl_align_col, _wl_avg = mtf_alignment(_wl_mtf)
                         wl_res.append({"Ticker":t,"Price":int(close),"Score":sc,"Signal":sig,
                             "Trend":trend,"RSI-EMA":round(float(r['RSI_EMA']),1),
                             "Stoch K":round(float(r['STOCH_K']),1),"RVOL":round(float(r['RVOL']),2),
                             "BB%":round(float(r['BB_pct']),2),"ROC 3B%":round(float(r['ROC3'])*100,2),
                             "VWAP":int(float(r['VWAP'])),"TP":int(tp),"SL":int(sl),"R:R":round(rr,1),
                             "ATR":round(atr,0),"MACD Hist":round(float(r['MACD_Hist']),4),
-                            "Reasons":" · ".join(reasons),"_class":get_card_class(sig)})
+                            "Reasons":" · ".join(reasons),"_class":get_card_class(sig),
+                            "Pivot Pos":_wl_pvt_pos,
+                            "PP":int(_wl_pvt["PP"]) if _wl_pvt else 0,
+                            "R1":int(_wl_pvt["R1"]) if _wl_pvt else 0,
+                            "S1":int(_wl_pvt["S1"]) if _wl_pvt else 0,
+                            "MTF Align":_wl_align,
+                            "M15":_wl_mtf.get("M15",0),"H1":_wl_mtf.get("H1",0),"D1":_wl_mtf.get("D1",0)})
                     except Exception as ex:
                         wl_res.append({"Ticker":t,"Price":0,"Score":0,"Signal":f"Err:{str(ex)[:20]}",
                             "RSI-EMA":0,"Stoch K":0,"RVOL":0,"BB%":0,"Trend":"-",
@@ -749,6 +895,13 @@ with tab_watchlist:
                     <div class="sc-stat">R:R <span>{row['R:R']}</span></div>
                   </div>
                   <div style="margin-top:8px;font-size:10px;color:#4a5568;line-height:1.5;font-family:Space Mono,monospace">{row['Reasons'][:80]}</div>
+                  <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+                    <div style="font-family:Space Mono,monospace;font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(0,0,0,.3);color:#4a5568;">📍 {row.get('Pivot Pos','-')}</div>
+                    <div style="font-family:Space Mono,monospace;font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(0,0,0,.3);color:#4a5568;">MTF: {row.get('MTF Align','-')}</div>
+                  </div>
+                  <div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568;margin-top:4px;">
+                    M15:{row.get('M15',0)} · H1:{row.get('H1',0)} · D1:{row.get('D1',0)} &nbsp;|&nbsp; PP:{row.get('PP',0):,} · R1:{row.get('R1',0):,} · S1:{row.get('S1',0):,}
+                  </div>
                 </div>"""
             ch += '</div>'
             st.markdown(ch, unsafe_allow_html=True)
@@ -756,7 +909,7 @@ with tab_watchlist:
             # Table
             df_wl = pd.DataFrame([r for r in wl_res if r["Price"]>0])
             if not df_wl.empty:
-                show = ["Ticker","Price","Score","Signal","Trend","RSI-EMA","Stoch K","RVOL","BB%","ROC 3B%","VWAP","TP","SL","R:R","ATR","Reasons"]
+                show = ["Ticker","Price","Score","Signal","Trend","RSI-EMA","Stoch K","RVOL","BB%","ROC 3B%","VWAP","TP","SL","R:R","MTF Align","M15","H1","D1","Pivot Pos","PP","R1","S1","ATR","Reasons"]
                 show = [c for c in show if c in df_wl.columns]
                 st.dataframe(df_wl[show], width='stretch', hide_index=True, column_config={
                     "Score":   st.column_config.ProgressColumn("Score",min_value=0,max_value=6,format="%.1f"),
@@ -794,7 +947,248 @@ with tab_watchlist:
         </div>""", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════
-#  TAB 3: BACKTEST
+#  TAB 3: BSJP — BELI SORE JUAL PAGI
+# ════════════════════════════════════════════════════
+with tab_bsjp:
+    now_wib = datetime.now(jakarta_tz)
+    is_entry_time = (now_wib.hour == 14 and now_wib.minute >= 30) or                     (now_wib.hour == 15 and now_wib.minute <= 45)
+    is_exit_time  = (now_wib.hour == 9) or (now_wib.hour == 10 and now_wib.minute == 0)
+
+    # Header BSJP
+    st.markdown(f"""
+    <div style="background:rgba(191,95,255,.08);border:1px solid rgba(191,95,255,.3);
+         border-radius:8px;padding:14px 18px;margin-bottom:16px;">
+      <div style="font-family:Space Mono,monospace;font-size:13px;font-weight:700;
+                  color:#bf5fff;letter-spacing:1px;">🌙 BELI SORE JUAL PAGI</div>
+      <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-top:4px;">
+        Entry: <span style="color:#ffb700">14:30 – 15:45 WIB</span> &nbsp;·&nbsp;
+        Exit: <span style="color:#00ff88">Besok 09:00 – 10:00 WIB</span> &nbsp;·&nbsp;
+        Status: <span style="color:{'#00ff88' if is_entry_time else '#ffb700' if is_exit_time else '#4a5568'}">
+          {'🟢 WAKTU ENTRY!' if is_entry_time else '🟡 WAKTU EXIT!' if is_exit_time else '⏳ Tunggu 14:30 WIB'}
+        </span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;
+         padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #bf5fff;margin-bottom:16px;">
+      💡 <b style="color:#c9d1d9">Strategi:</b> Beli saham dengan momentum kuat di sore hari (14:30-15:45),
+      jual pagi hari berikutnya (09:00-10:00) saat gap up opening.<br>
+      Cocok untuk overnight hold dengan risiko terukur.
+    </div>
+    """, unsafe_allow_html=True)
+
+    bsjp_c1, bsjp_c2 = st.columns([2,1])
+    with bsjp_c1:
+        bsjp_min_score = st.slider("Min BSJP Score", 0, 6, 4, key="bsjp_score")
+        bsjp_min_rvol  = st.slider("Min RVOL", 1.0, 5.0, 1.5, 0.1, key="bsjp_rvol")
+    with bsjp_c2:
+        bsjp_min_turn  = st.number_input("Min Turnover (M Rp)", value=500, step=100, key="bsjp_turn") * 1_000_000
+        bsjp_tele      = st.toggle("📡 Telegram Alert", value=True, key="bsjp_tele")
+
+    do_bsjp = st.button("🌙 SCAN BSJP SEKARANG", type="primary", use_container_width=True, key="btn_bsjp")
+
+    if "bsjp_results" not in st.session_state: st.session_state.bsjp_results = []
+
+    if do_bsjp:
+        bsjp_prog = st.empty()
+        bsjp_prog.info("🌙 Scanning BSJP candidates...")
+        bsjp_res = []
+        scan_data = st.session_state.get("data_dict", {})
+
+        # Kalau data_dict kosong, fetch dulu
+        if not scan_data:
+            bsjp_prog.warning("⚠️ Jalankan Scanner Intraday dulu, atau scan khusus BSJP di bawah...")
+            try:
+                scan_data = fetch_intraday(tuple(stocks_yf[:200]))  # quick 200 untuk BSJP
+            except: pass
+
+        pb_bsjp = st.progress(0)
+        tickers_bsjp = list(scan_data.keys())
+
+        for i, ticker_yf in enumerate(tickers_bsjp):
+            pb_bsjp.progress((i+1)/max(len(tickers_bsjp),1))
+            try:
+                df = scan_data[ticker_yf].copy()
+                if len(df) < 55: continue
+
+                # Filter hanya data sore (13:00-16:00 WIB = 06:00-09:00 UTC)
+                df_copy = apply_intraday_indicators(df)
+
+                # Gunakan bar terakhir (sore hari)
+                r=df_copy.iloc[-1]; p=df_copy.iloc[-2]; p2=df_copy.iloc[-3] if len(df_copy)>=3 else p
+                close=float(r['Close']); vol=float(r['Volume'])
+                turnover=close*vol; rvol=float(r['RVOL'])
+
+                if turnover < bsjp_min_turn or rvol < bsjp_min_rvol: continue
+
+                sc, reasons, _ = score_bsjp(r, p, p2)
+                if sc < bsjp_min_score: continue
+
+                # Signal label
+                if sc >= 5:   bsjp_sig = "STRONG BUY 🌙"
+                elif sc >= 4: bsjp_sig = "BUY ⚡"
+                else:         bsjp_sig = "WATCH 👀"
+
+                # TP/SL untuk overnight
+                atr = float(r['ATR'])
+                tp  = close + 2.0*atr   # overnight TP lebih lebar
+                sl  = close - 1.0*atr
+                rr  = (tp-close)/max(close-sl,0.01)
+
+                # Pivot points
+                pvt = fetch_pivot_data(ticker_yf)
+                pvt_pos, pvt_col = get_pivot_position(close, pvt)[:2] if pvt else ("-","#4a5568")
+
+                e9=float(r['EMA9']); e21=float(r['EMA21']); e50=float(r['EMA50'])
+                trend="▲ UP" if e9>e21>e50 else("▼ DOWN" if e9<e21<e50 else"◆ SIDE")
+
+                bsjp_res.append({
+                    "Ticker":stock_map.get(ticker_yf, ticker_yf.replace(".JK","")),
+                    "Price":int(close),"Score":sc,"Signal":bsjp_sig,"Trend":trend,
+                    "RSI-EMA":round(float(r['RSI_EMA']),1),"Stoch K":round(float(r['STOCH_K']),1),
+                    "RVOL":round(rvol,2),"TP":int(tp),"SL":int(sl),"R:R":round(rr,1),
+                    "Turnover(M)":round(turnover/1e6,1),"Pivot Pos":pvt_pos,
+                    "PP":int(pvt["PP"]) if pvt else 0,
+                    "R1":int(pvt["R1"]) if pvt else 0,
+                    "S1":int(pvt["S1"]) if pvt else 0,
+                    "Reasons":" · ".join(reasons),
+                    "_class":"gacor" if sc>=5 else "potensial" if sc>=4 else "watch"
+                })
+            except: continue
+
+        pb_bsjp.empty()
+        bsjp_prog.empty()
+        bsjp_res = sorted(bsjp_res, key=lambda x: x["Score"], reverse=True)
+        st.session_state.bsjp_results = bsjp_res
+
+        # Telegram
+        if bsjp_tele and bsjp_res:
+            now_b = datetime.now(jakarta_tz)
+            sep = "━"*28
+            msg = (f"🌙 *BSJP ALERT — BELI SORE JUAL PAGI*\n"
+                   f"⏰ `{now_b.strftime('%H:%M:%S')} WIB` · `{now_b.strftime('%d %b %Y')}`\n{sep}\n")
+            for r in bsjp_res[:5]:
+                bar = "█"*int(r['Score'])+"░"*(6-int(r['Score']))
+                msg += (f"\n🌙 *{r['Ticker']}* `{r['Signal']}`\n"
+                        f"   💰 Price: `{r['Price']:,}` {('📈' if '▲' in r['Trend'] else '📉' if '▼' in r['Trend'] else '➡️')}\n"
+                        f"   📊 Score: `[{bar}] {r['Score']}/6`\n"
+                        f"   📈 RSI-EMA: `{r['RSI-EMA']}` | RVOL: `{r['RVOL']}x`\n"
+                        f"   🎯 TP: `{r['TP']:,}` | 🛑 SL: `{r['SL']:,}` | R:R `{r['R:R']}`\n"
+                        f"   📍 Pivot: `{r['Pivot Pos']}`\n"
+                        f"   💡 _{r['Reasons'][:50]}_\n")
+            msg += f"\n{sep}\n🌙 _Entry 14:30-15:45 · Exit besok 09:00-10:00_\n⚠️ _BUKAN saran investasi!_"
+            try:
+                requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                              data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"Markdown"}, timeout=10)
+            except: pass
+
+    # Display BSJP results
+    bsjp_results = st.session_state.bsjp_results
+    if bsjp_results:
+        strong = [r for r in bsjp_results if "STRONG" in r.get("Signal","")]
+        buy    = [r for r in bsjp_results if r.get("Signal","")=="BUY ⚡"]
+
+        st.markdown(f"""
+        <div class="metric-row">
+          <div class="metric-card" style="border-top-color:#bf5fff"><div class="metric-label">Dipindai</div>
+            <div class="metric-value">{len(bsjp_results)}</div></div>
+          <div class="metric-card green"><div class="metric-label">Strong Buy 🌙</div>
+            <div class="metric-value">{len(strong)}</div></div>
+          <div class="metric-card amber"><div class="metric-label">Buy ⚡</div>
+            <div class="metric-value">{len(buy)}</div></div>
+          <div class="metric-card"><div class="metric-label">Entry</div>
+            <div class="metric-value" style="font-size:13px;color:#ffb700">14:30</div>
+            <div class="metric-sub">sampai 15:45 WIB</div></div>
+          <div class="metric-card"><div class="metric-label">Exit</div>
+            <div class="metric-value" style="font-size:13px;color:#00ff88">09:00</div>
+            <div class="metric-sub">besok pagi WIB</div></div>
+        </div>""", unsafe_allow_html=True)
+
+        # Top 3 highlight
+        if len(bsjp_results) >= 1:
+            medals = ["🥇","🥈","🥉"]
+            cols_top = st.columns(min(3, len(bsjp_results)))
+            for idx, col in enumerate(cols_top):
+                if idx >= len(bsjp_results): break
+                row = bsjp_results[idx]
+                sig_col = "#00ff88" if "STRONG" in row["Signal"] else "#ffb700"
+                with col:
+                    st.markdown(f"""
+                    <div style="background:#0d1117;border:1px solid {sig_col}44;border-radius:10px;
+                         padding:16px;text-align:center;border-top:3px solid {sig_col};">
+                      <div style="font-size:24px">{medals[idx]}</div>
+                      <div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:#e6edf3;">{row['Ticker']}</div>
+                      <div style="font-family:Space Mono,monospace;font-size:28px;font-weight:700;color:{sig_col};">{row['Score']}</div>
+                      <div style="font-size:11px;font-weight:700;color:{sig_col};">{row['Signal']}</div>
+                      <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-top:6px;">
+                        RVOL {row['RVOL']}x · RSI {row['RSI-EMA']}
+                      </div>
+                      <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">
+                        TP {row['TP']:,} · SL {row['SL']:,}
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+
+        # Full cards
+        st.markdown('<div class="section-title">Semua Kandidat BSJP</div>', unsafe_allow_html=True)
+        bsjp_html = '<div class="signal-grid">'
+        for row in bsjp_results:
+            sc_int = int(row["Score"])
+            bars   = ''.join([f'<div class="sc-bar {"filled" if i<sc_int else "empty"}" style="width:26px"></div>' for i in range(6)])
+            sig    = row.get("Signal","-")
+            sc_col = "#00ff88" if "STRONG" in sig else "#ffb700" if "BUY" in sig else "#00e5ff"
+            te     = "📈" if "▲" in row["Trend"] else ("📉" if "▼" in row["Trend"] else "➡️")
+            bsjp_html += f"""<div class="signal-card {row['_class']}">
+              <div style="display:flex;justify-content:space-between;">
+                <div><div class="sc-ticker">{row['Ticker']}</div>
+                <div class="sc-price">{row['Price']:,} {te}</div></div>
+                <div style="text-align:right">
+                  <div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568">SCORE</div>
+                  <div style="font-family:Space Mono,monospace;font-size:22px;font-weight:700;color:{sc_col}">{row['Score']}</div>
+                </div>
+              </div>
+              <div class="sc-signal" style="color:{sc_col}">{sig}</div>
+              <div class="sc-bars">{bars}</div>
+              <div class="sc-stats">
+                <div class="sc-stat">RSI-EMA <span>{row['RSI-EMA']}</span></div>
+                <div class="sc-stat">RVOL <span>{row['RVOL']}x</span></div>
+                <div class="sc-stat">R:R <span>{row['R:R']}</span></div>
+              </div>
+              <div class="sc-stats" style="margin-top:6px">
+                <div class="sc-stat">TP <span style="color:#00ff88">{row['TP']:,}</span></div>
+                <div class="sc-stat">SL <span style="color:#ff3d5a">{row['SL']:,}</span></div>
+              </div>
+              <div style="margin-top:6px;font-family:Space Mono,monospace;font-size:9px;color:#4a5568;">
+                📍 {row['Pivot Pos']} · PP {row['PP']:,}
+              </div>
+              <div style="margin-top:4px;font-size:10px;color:#4a5568;line-height:1.4;font-family:Space Mono,monospace">{row['Reasons'][:70]}</div>
+            </div>"""
+        bsjp_html += '</div>'
+        st.markdown(bsjp_html, unsafe_allow_html=True)
+
+        # Table
+        df_bsjp = pd.DataFrame(bsjp_results)
+        show_cols = ["Ticker","Price","Score","Signal","Trend","RSI-EMA","Stoch K","RVOL","TP","SL","R:R","Pivot Pos","PP","R1","S1","Turnover(M)","Reasons"]
+        show_cols = [c for c in show_cols if c in df_bsjp.columns]
+        st.dataframe(df_bsjp[show_cols], width='stretch', hide_index=True, column_config={
+            "Score": st.column_config.ProgressColumn("Score",min_value=0,max_value=6,format="%.1f"),
+            "RVOL":  st.column_config.NumberColumn("RVOL",format="%.2fx"),
+        })
+
+    elif not do_bsjp:
+        st.markdown("""
+        <div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;">
+          <div style="font-size:32px;margin-bottom:12px;">🌙</div>
+          <div style="font-size:12px;letter-spacing:2px;">KLIK SCAN BSJP</div>
+          <div style="font-size:10px;margin-top:8px;color:#2d3748;">
+            Best digunakan jam 14:00–15:45 WIB<br>
+            Entry sore → jual besok pagi gap up 🚀
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+# ════════════════════════════════════════════════════
+#  TAB 4: BACKTEST
 # ════════════════════════════════════════════════════
 with tab_backtest:
     st.markdown('<div class="section-title">Backtest Engine · 15M Intraday</div>', unsafe_allow_html=True)
