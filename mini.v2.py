@@ -224,32 +224,98 @@ def vwap(df):
     return (tp*df['Volume']).cumsum()/df['Volume'].cumsum()
 
 def apply_intraday_indicators(df):
+    """
+    Upgraded indicators — setting suhu:
+    - Stoch K(10,5,5): period 10, K smooth EMA5, D smooth EMA5
+    - RSI(14) + EMA smooth(14)
+    - MACD EMA oscillator & signal
+    - Wick analysis (upper/lower)
+    - Foreign flow (if DataSectors data)
+    """
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-    df['EMA9']  = ema(df['Close'],9);  df['EMA21'] = ema(df['Close'],21)
-    df['EMA50'] = ema(df['Close'],50); df['EMA200']= ema(df['Close'],200)
-    df['RSI'], df['RSI_EMA'] = rsi_smooth(df['Close'],14,3)
-    df['STOCH_K'], df['STOCH_D'] = stochastic(df['High'],df['Low'],df['Close'],14,3)
-    df['MACD'], df['MACD_Sig'], df['MACD_Hist'] = macd(df['Close'])
+    c = df['Close']
+
+    # ── EMA Stack ──
+    df['EMA9']  = ema(c,9);  df['EMA21'] = ema(c,21)
+    df['EMA50'] = ema(c,50); df['EMA200']= ema(c,200)
+
+    # ── RSI(14) + EMA Smooth(14) — setting suhu ──
+    d=c.diff(); g=d.clip(lower=0).ewm(span=14,adjust=False).mean()
+    l=(-d.clip(upper=0)).ewm(span=14,adjust=False).mean()
+    rsi_raw = (100-100/(1+g/l.replace(0,np.nan))).fillna(50)
+    df['RSI']     = rsi_raw
+    df['RSI_EMA'] = rsi_raw.ewm(span=14,adjust=False).mean()  # smoothed line
+    # RSI short (5 period)
+    d5=c.diff(); g5=d5.clip(lower=0).ewm(span=5,adjust=False).mean()
+    l5=(-d5.clip(upper=0)).ewm(span=5,adjust=False).mean()
+    df['RSI5']    = (100-100/(1+g5/l5.replace(0,np.nan))).fillna(50)
+
+    # ── STOCHASTIC K(10,5,5) — setting suhu ──
+    lo10 = df['Low'].rolling(10).min()
+    hi10 = df['High'].rolling(10).max()
+    raw_k = (100*(c-lo10)/(hi10-lo10).replace(0,np.nan)).fillna(50)
+    df['STOCH_K'] = raw_k.ewm(span=5,adjust=False).mean()   # %K smoothed
+    df['STOCH_D'] = df['STOCH_K'].ewm(span=5,adjust=False).mean()  # %D
+    df['STOCH_CROSS_UP']  = (df['STOCH_K']>df['STOCH_D']) & (df['STOCH_K'].shift(1)<=df['STOCH_D'].shift(1))
+    df['STOCH_CROSS_DOWN']= (df['STOCH_K']<df['STOCH_D']) & (df['STOCH_K'].shift(1)>=df['STOCH_D'].shift(1))
+
+    # ── MACD EMA — setting suhu ──
+    ema12=c.ewm(span=12,adjust=False).mean(); ema26=c.ewm(span=26,adjust=False).mean()
+    macd_line=ema12-ema26; signal_line=macd_line.ewm(span=9,adjust=False).mean()
+    df['MACD']      = macd_line
+    df['MACD_Sig']  = signal_line
+    df['MACD_Hist'] = (macd_line-signal_line).fillna(0)
+    df['MACD_CROSS_UP']  = (macd_line>signal_line) & (macd_line.shift(1)<=signal_line.shift(1))
+    df['MACD_CROSS_DOWN']= (macd_line<signal_line) & (macd_line.shift(1)>=signal_line.shift(1))
+
+    # ── VWAP ──
     try:    df['VWAP'] = vwap(df)
-    except: df['VWAP'] = df['Close']
-    df['BB_mid']  = df['Close'].rolling(20).mean()
-    df['BB_std']  = df['Close'].rolling(20).std()
-    df['BB_upper']= df['BB_mid']+2*df['BB_std']; df['BB_lower']= df['BB_mid']-2*df['BB_std']
-    df['BB_pct']  = (df['Close']-df['BB_lower'])/(df['BB_upper']-df['BB_lower'])
-    df['AvgVol']  = df['Volume'].rolling(20).mean()
-    df['RVOL']    = df['Volume']/df['AvgVol']
-    df['NetVol']  = np.where(df['Close']>=df['Open'],df['Volume'],-df['Volume'])
+    except: df['VWAP'] = c
+
+    # ── BB ──
+    df['BB_mid']  = c.rolling(20).mean()
+    df['BB_std']  = c.rolling(20).std()
+    df['BB_upper']= df['BB_mid']+2*df['BB_std']
+    df['BB_lower']= df['BB_mid']-2*df['BB_std']
+    df['BB_pct']  = (c-df['BB_lower'])/(df['BB_upper']-df['BB_lower'])
+
+    # ── RVOL ──
+    df['AvgVol'] = df['Volume'].rolling(20).mean()
+    df['RVOL']   = df['Volume']/df['AvgVol'].replace(0,np.nan)
+
+    # ── ATR ──
+    tr = pd.concat([df['High']-df['Low'],
+                    (df['High']-c.shift()).abs(),
+                    (df['Low'] -c.shift()).abs()],axis=1).max(axis=1)
+    df['ATR'] = tr.rolling(14).mean()
+
+    # ── WICK ANALYSIS ──
+    body_top = df[['Close','Open']].max(axis=1)
+    body_bot = df[['Close','Open']].min(axis=1)
+    hl = (df['High']-df['Low']).replace(0,np.nan)
+    df['LWick']    = ((body_bot-df['Low'])/hl*100).fillna(0)   # Lower wick %
+    df['UWick']    = ((df['High']-body_top)/hl*100).fillna(0)  # Upper wick %
+    df['Body']     = (body_top-body_bot)/hl*100
+    df['BodyRatio']= (body_top-body_bot)/hl.fillna(0)
+    df['BullBar']  = (df['Close']>df['Open'])&(df['BodyRatio']>0.5)
+
+    # ── NET VOL & ROC ──
+    df['NetVol']  = np.where(c>=df['Open'],df['Volume'],-df['Volume'])
     df['NetVol3'] = pd.Series(df['NetVol'],index=df.index).rolling(3).sum()
     df['NetVol8'] = pd.Series(df['NetVol'],index=df.index).rolling(8).sum()
     df['VolSpike']= df['RVOL']>2.5
-    df['Body']    = (df['Close']-df['Open']).abs()
-    df['BodyRatio']= df['Body']/(df['High']-df['Low']).replace(0,np.nan)
-    df['BullBar'] = (df['Close']>df['Open'])&(df['BodyRatio']>0.5)
-    df['ROC3']    = df['Close'].pct_change(3); df['ROC8'] = df['Close'].pct_change(8)
-    df['HH']= df['High']>df['High'].shift(1);  df['HL']= df['Low']>df['Low'].shift(1)
-    df['LL']= df['Low']<df['Low'].shift(1);    df['LH']= df['High']<df['High'].shift(1)
-    tr = pd.concat([df['High']-df['Low'],(df['High']-df['Close'].shift()).abs(),(df['Low']-df['Close'].shift()).abs()],axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(14).mean()
+    df['ROC3']    = c.pct_change(3); df['ROC8']=c.pct_change(8)
+    df['HH']= df['High']>df['High'].shift(1); df['HL']=df['Low']>df['Low'].shift(1)
+    df['LL']= df['Low']<df['Low'].shift(1);   df['LH']=df['High']<df['High'].shift(1)
+
+    # ── FOREIGN FLOW (DataSectors) ──
+    if 'FBuy' in df.columns and 'FSell' in df.columns:
+        df['FNet']  = df['FBuy']-df['FSell']
+        df['FCum']  = df['FNet'].cumsum()
+        df['FNet3'] = df['FNet'].rolling(3).sum()
+        df['FNet8'] = df['FNet'].rolling(8).sum()
+        tot = df['FBuy']+df['FSell']
+        df['FRatio'] = (df['FBuy']/tot.replace(0,np.nan)).fillna(0.5)
     return df
 
 # ════════════════════════════════════════════════════
@@ -338,6 +404,137 @@ def get_card_class(signal):
     if "POTENSIAL" in signal: return "potensial"
     if "WATCH" in signal: return "watch"
     return ""
+
+def get_sinyal_v2(r, p, p2):
+    """
+    Unified signal — suhu method:
+    Stoch(10,5,5) + RSI EMA(14) + MACD EMA + RVOL + Wick + Foreign Flow
+    """
+    def sf(v,d=0.):
+        try: x=float(v); return d if(np.isnan(x) or np.isinf(x)) else x
+        except: return d
+
+    cl    = sf(r.get('Close',0))
+    e9    = sf(r.get('EMA9'));   e21=sf(r.get('EMA21')); e50=sf(r.get('EMA50'))
+    rsi_ema= sf(r.get('RSI_EMA',50)); rsi_ema_p=sf(p.get('RSI_EMA',50))
+    sk    = sf(r.get('STOCH_K',50)); sd=sf(r.get('STOCH_D',50))
+    sk_p  = sf(p.get('STOCH_K',50)); sd_p=sf(p.get('STOCH_D',50))
+    mh    = sf(r.get('MACD_Hist',0)); mh_p=sf(p.get('MACD_Hist',0))
+    macd_v= sf(r.get('MACD',0));   sig_v=sf(r.get('MACD_Sig',0))
+    macd_p= sf(p.get('MACD',0));   sig_p=sf(p.get('MACD_Sig',0))
+    rv    = sf(r.get('RVOL',1))
+    lw    = sf(r.get('LWick',0)); uw=sf(r.get('UWick',0))
+    body  = sf(r.get('Body',50))
+    vwap_v= sf(r.get('VWAP',cl))
+
+    score=0; flags=[]
+
+    # EMA
+    ema_bull=e9>e21>e50; ema_gc=e9>e21; ema_bear=e9<e21<e50
+    p_e9=sf(p.get('EMA9')); p_e21=sf(p.get('EMA21'))
+    gc_now = (e9>e21) and (p_e9<=p_e21)
+
+    if ema_bull:   score+=15; flags.append("EMA▲")
+    elif ema_gc:   score+=8;  flags.append("EMA GC")
+    elif ema_bear: score-=12
+
+    # STOCH K(10,5,5)
+    stoch_os=sk<20; stoch_ob=sk>80
+    stoch_cu=sk>sd and sk_p<=sd_p
+    stoch_cd=sk<sd and sk_p>=sd_p
+    if stoch_os:
+        score+=12; flags.append(f"STOCH OS {sk:.0f}")
+        if stoch_cu: score+=8; flags.append("STOCH ↑")
+    elif stoch_ob: score-=10
+    elif stoch_cu and sk<60: score+=6; flags.append("STOCH ↑")
+
+    # RSI EMA smooth
+    rsi_os=rsi_ema<40; rsi_os2=rsi_ema<30; rsi_ob=rsi_ema>65
+    rsi_cu=rsi_ema>rsi_ema_p and rsi_ema_p<40
+    if rsi_os2:  score+=12; flags.append(f"RSI {rsi_ema:.0f} OS")
+    elif rsi_os: score+=7;  flags.append(f"RSI {rsi_ema:.0f}")
+    elif 45<rsi_ema<65: score+=5
+    elif rsi_ob: score-=8
+    if rsi_cu:   score+=6; flags.append("RSI ↑")
+
+    # MACD EMA
+    macd_cu=macd_v>sig_v and macd_p<=sig_p
+    macd_cd=macd_v<sig_v and macd_p>=sig_p
+    macd_exp=mh>0 and mh>mh_p
+    if macd_cu:    score+=10; flags.append("MACD ↑")
+    elif macd_exp: score+=7;  flags.append("MACD Exp")
+    elif mh>0:     score+=3
+    elif macd_cd:  score-=10; flags.append("MACD ↓")
+    elif mh<0 and mh<mh_p: score-=5
+
+    # RVOL
+    if rv>3:    score+=15; flags.append(f"RVOL {rv:.1f}x 🔥")
+    elif rv>2:  score+=10; flags.append(f"RVOL {rv:.1f}x")
+    elif rv>1.5:score+=5;  flags.append(f"RVOL {rv:.1f}x")
+    elif rv<0.5:score-=5
+
+    # Wick
+    if lw>60:   score+=10; flags.append(f"LWick {lw:.0f}%")
+    elif lw>40: score+=6
+    elif lw>25: score+=3
+    uw_sell = uw>50 and body<30
+    if uw_sell: flags.append(f"UWick JUAL {uw:.0f}%")
+
+    # VWAP
+    if cl>vwap_v:   score+=5; flags.append("VWAP▲")
+    elif cl<vwap_v: score-=3
+
+    # Foreign flow
+    fnet3=sf(r.get('FNet3',0)); fnet8=sf(r.get('FNet8',0))
+    fratio=sf(r.get('FRatio',0.5))
+    if fnet3>0 and fnet8>0:
+        score+=10; flags.append("🔵 Asing Akum")
+        if fratio>0.7: score+=5; flags.append("Asing Dom")
+    elif fnet3<0 and fnet8<0:
+        score-=8; flags.append("🔴 Asing Jual")
+
+    # Signal detection
+    entry_kuat = ((stoch_os or (sk<50 and ema_bear)) and (rsi_os or rsi_cu) and (macd_cu or macd_exp) and rv>=1.2)
+    entry_mod  = sum([stoch_os or stoch_cu, rsi_os or rsi_cu, macd_exp or macd_cu])>=2 and rv>=1.0
+    is_bandar  = (fnet3>0 and fnet8>0 and fratio>0.6 and rv>1.2 and ema_gc)
+    is_haka    = (ema_bull and rv>1.5 and macd_exp and rsi_ema>50 and sk>sd and cl>vwap_v)
+    is_super   = (entry_kuat and rv>2 and score>=35)
+    is_rebound = (entry_kuat and (stoch_os or rsi_os2))
+    is_jual    = (uw_sell and (stoch_ob or rsi_ob) and rv>1.0)
+
+    if is_jual:    return "JUAL ⬇️",   score, " · ".join(flags[:3]), gc_now
+    if is_bandar:  return "BANDAR 🔵",  score, " · ".join(flags[:3]), gc_now
+    if is_haka:    return "HAKA 🔨",   score, " · ".join(flags[:3]), gc_now
+    if is_super:   return "SUPER 🔥",  score, " · ".join(flags[:3]), gc_now
+    if is_rebound: return "REBOUND 🏀", score, " · ".join(flags[:3]), gc_now
+    if entry_mod and score>=20: return "AKUM 📦", score, " · ".join(flags[:3]), gc_now
+    if score>=15:  return "ON TRACK ✅", score, " · ".join(flags[:3]), gc_now
+    return "WAIT ❌", score, " · ".join(flags[:3]), gc_now
+
+def get_aksi_v2(sinyal, gc_now, score):
+    if "BANDAR" in sinyal or (("HAKA" in sinyal or "SUPER" in sinyal) and score>=35):
+        return "AT ENTRY 🎯"
+    elif "REBOUND" in sinyal: return "WATCH REB 🏀"
+    elif gc_now:              return "GC NOW ⚡"
+    elif score>=25:           return "AT ENTRY 🎯"
+    elif score>=15:           return "WAIT GC ⏳"
+    else:                     return "WAIT ❌"
+
+def get_rsi_sig_v2(rsi_ema):
+    if rsi_ema>=60:   return "UP",   "#00ff88"
+    elif rsi_ema<35:  return "DEAD", "#ff3d5a"
+    elif rsi_ema<45:  return "DOWN", "#ff7b00"
+    return "NEUTRAL", "#4a5568"
+
+def get_asing_v2(r):
+    def sf(v,d=0.):
+        try: x=float(v); return d if(np.isnan(x) or np.isinf(x)) else x
+        except: return d
+    fnet3=sf(r.get('FNet3',0)); fnet8=sf(r.get('FNet8',0))
+    if fnet3>0 and fnet8>0:   return "🔵 BELI","#4da6ff"
+    elif fnet3<0 and fnet8<0: return "🔴 JUAL","#ff3d5a"
+    return "⚪ MIX","#4a5568"
+
 
 # ════════════════════════════════════════════════════
 #  TELEGRAM — format detail
@@ -1000,15 +1197,99 @@ with tab_scanner:
             st.markdown(card_html, unsafe_allow_html=True)
 
         st.markdown('<div class="section-title">Full Signal Table</div>', unsafe_allow_html=True)
-        display_cols=["Ticker","Price","Score","Signal","Trend","RSI-EMA","Stoch K","Stoch D","MACD Hist","RVOL","BB%","ROC 3B%","VWAP","TP","SL","R:R","Turnover(M)","Reasons"]
-        st.dataframe(df_out[display_cols], width='stretch', hide_index=True, column_config={
-            "Score":      st.column_config.ProgressColumn("Score",min_value=0,max_value=6,format="%.1f"),
-            "RSI-EMA":    st.column_config.NumberColumn("RSI-EMA",format="%.1f"),
-            "Stoch K":    st.column_config.NumberColumn("Stoch K",format="%.1f"),
-            "RVOL":       st.column_config.NumberColumn("RVOL",format="%.1fx"),
-            "ROC 3B%":    st.column_config.NumberColumn("ROC 3B%",format="%.2f%%"),
-            "Turnover(M)":st.column_config.NumberColumn("Turnover(M)",format="Rp%.0fM"),
-        })
+
+        # ── NEW TABLE STYLE — persis High Prob Screener ──
+        def tt_aksi_badge(aksi):
+            if "AT ENTRY" in str(aksi): return f'<span style="background:#1a472a;color:#00ff88;padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700">{aksi}</span>'
+            elif "GC NOW" in str(aksi): return f'<span style="background:#1a3a4a;color:#00e5ff;padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700">{aksi}</span>'
+            elif "WATCH"  in str(aksi): return f'<span style="background:#2a2a1a;color:#ffb700;padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700">{aksi}</span>'
+            return f'<span style="background:#2a1a1a;color:#ff3d5a;padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700">{aksi}</span>'
+
+        def tt_sinyal_badge(s):
+            s=str(s)
+            if "BANDAR"  in s: return f'<span style="background:#0d1a2e;color:#4da6ff;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid #4da6ff66">{s}</span>'
+            if "HAKA"    in s: return f'<span style="background:#0d2b0d;color:#00ff88;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid #00ff8855">{s}</span>'
+            if "SUPER"   in s: return f'<span style="background:#1a0d2e;color:#bf5fff;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid #bf5fff55">{s}</span>'
+            if "REBOUND" in s: return f'<span style="background:#2b1a00;color:#ffb700;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid #ffb70055">{s}</span>'
+            if "JUAL"    in s: return f'<span style="background:#2b0d0d;color:#ff3d5a;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid #ff3d5a55">{s}</span>'
+            if "GACOR"   in s: return f'<span style="background:#0d2b0d;color:#00ff88;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid #00ff8855">{s}</span>'
+            if "REVERSAL"in s: return f'<span style="background:#1a0d2e;color:#bf5fff;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700">{s}</span>'
+            if "POTENSIAL"in s:return f'<span style="background:#1a1a0d;color:#ffb700;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700">{s}</span>'
+            if "AKUM"    in s: return f'<span style="background:#0d1a1a;color:#00e5ff;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid #00e5ff44">{s}</span>'
+            if "ON TRACK"in s: return f'<span style="background:#0d1a0d;color:#00ff88;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700">{s}</span>'
+            return f'<span style="background:#1a1a1a;color:#4a5568;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700">{s}</span>'
+
+        # Build HTML table
+        rows_html=""
+        for _,row in df_out.head(50).iterrows():
+            gain_roc = row.get("ROC 3B%",0)
+            gc  = "#00ff88" if gain_roc>0 else "#ff3d5a"
+            rsi_v= row.get("RSI-EMA",50)
+            rsi_s= "UP" if rsi_v>60 else ("DEAD" if rsi_v<35 else ("DOWN" if rsi_v<45 else "NEU"))
+            rsi_c= "#00ff88" if rsi_v>60 else "#ff3d5a" if rsi_v<35 else "#ff7b00" if rsi_v<45 else "#4a5568"
+            rvol_v=row.get("RVOL",1); rvol_s=f"{rvol_v*100:.0f}%" if rvol_v<10 else f"{rvol_v:.1f}x"
+            # Asing
+            fnet3=row.get("FNet3",0); fnet8=row.get("FNet8",0)
+            if fnet3>0 and fnet8>0: fdir,fc="🔵 BELI","#4da6ff"
+            elif fnet3<0 and fnet8<0: fdir,fc="🔴 JUAL","#ff3d5a"
+            else: fdir,fc="⚪ MIX","#4a5568"
+            # Signals v2
+            try:
+                r_row=df_out.loc[row.name] if row.name in df_out.index else row
+                sinyal_v2 = row.get("Sinyal_v2", row.get("Signal","-"))
+                aksi_v2   = row.get("Aksi_v2",   "-")
+            except:
+                sinyal_v2 = row.get("Signal","-"); aksi_v2="-"
+            # Gain display
+            gain_pct = row.get("ROC 3B%",0)
+            tp_v=row.get("TP",0); sl_v=row.get("SL",0); price=row.get("Price",0)
+            profit_pct=(tp_v-price)/max(price,1)*100 if price>0 else 0
+            upside_pct=profit_pct
+            lwick=row.get("LWick",0) if "LWick" in df_out.columns else 0
+            rows_html+=f"""<tr style="font-family:Space Mono,monospace;font-size:10px;">
+<td style="padding:5px 6px;font-weight:700;color:#e6edf3;text-align:left;border-bottom:1px solid #1c2533;white-space:nowrap">{row['Ticker']}</td>
+<td style="padding:5px 6px;color:{gc};font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{gain_pct:+.1f}%</td>
+<td style="padding:5px 6px;color:{"#00ff88" if lwick>30 else "#4a5568"};border-bottom:1px solid #1c2533;text-align:center">{lwick:.0f}%</td>
+<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center">{tt_aksi_badge(aksi_v2)}</td>
+<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center">{tt_sinyal_badge(sinyal_v2)}</td>
+<td style="padding:5px 6px;color:#ff7b00;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{rvol_s}</td>
+<td style="padding:5px 6px;color:#c9d1d9;border-bottom:1px solid #1c2533;text-align:center">{row["Price"]:,}</td>
+<td style="padding:5px 6px;background:#0d2b0d;color:#00ff88;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{int(tp_v):,}</td>
+<td style="padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center">{int(sl_v):,}</td>
+<td style="padding:5px 6px;color:#00ff88;border-bottom:1px solid #1c2533;text-align:center">{profit_pct:.1f}%</td>
+<td style="padding:5px 6px;color:#00e5ff;border-bottom:1px solid #1c2533;text-align:center">{upside_pct:.1f}%</td>
+<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center"><span style="color:{rsi_c};font-weight:700">{rsi_s}</span></td>
+<td style="padding:5px 6px;color:{rsi_c};border-bottom:1px solid #1c2533;text-align:center">{rsi_v:.0f}</td>
+<td style="padding:5px 6px;color:#4a5568;font-size:9px;border-bottom:1px solid #1c2533;text-align:center">{row.get("Turnover(M)",0):.0f}M</td>
+<td style="padding:5px 6px;color:{fc};border-bottom:1px solid #1c2533;text-align:center;font-size:10px">{fdir}</td>
+</tr>"""
+
+        st.markdown(f"""
+<div style="overflow-x:auto;border-radius:8px;border:1px solid #1c2533;max-height:70vh;overflow-y:auto;">
+<table style="width:100%;border-collapse:collapse;">
+<thead><tr style="background:#080c10;position:sticky;top:0;z-index:10;">
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;text-align:left;border-bottom:2px solid #1c2533">EMITEN</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">GAIN</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">WICK</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">AKSI</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">SINYAL</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">RVOL</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">NOW</th>
+  <th style="padding:7px 6px;color:#00ff88;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">TP</th>
+  <th style="padding:7px 6px;color:#ff3d5a;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">SL</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">PROFIT</th>
+  <th style="padding:7px 6px;color:#00e5ff;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">UPSIDE</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">RSI SIG</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">RSI</th>
+  <th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">TURNOVER</th>
+  <th style="padding:7px 6px;color:#4da6ff;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">ASING</th>
+</tr></thead>
+<tbody style="background:#0d1117">{rows_html}</tbody>
+</table>
+<div style="padding:6px 12px;background:#080c10;font-family:Space Mono,monospace;font-size:9px;color:#4a5568;border-top:1px solid #1c2533">
+  AKSI=kondisi posisi · SINYAL=kondisi pasar · SL=1xATR · TP=2xATR · Theta Turbo v5 ⚡
+</div>
+</div>""", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════
 #  TAB 2: WATCHLIST ANALYZER
