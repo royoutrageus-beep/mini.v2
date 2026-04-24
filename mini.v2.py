@@ -30,7 +30,7 @@ DS_BASE = "https://api.datasectors.com"
 #  FIX: @st.cache_data TIDAK thread-safe di ThreadPoolExecutor!
 #  Solusi: pickle di ~/.hp_cache + memory dict + threading.Lock
 # ════════════════════════════════════════════════════
-CACHE_DIR = Path.home() / ".hp_cache"
+CACHE_DIR = Path("/tmp/hp_cache") if Path("/tmp").exists() else Path.home() / ".hp_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 CACHE_TTL  = 300   # 5 menit
 _mem       = {}
@@ -169,7 +169,7 @@ def fetch_ds_ohlcv(ticker, interval="15m", limit=200, force_fresh=False):
 #  SESSION STATE
 # ════════════════════════════════════════════════════
 # ── Disk persistence for scan results ──
-_TT_RESULTS_FILE = Path.home() / ".hp_cache" / "tt_last_results.pkl"
+_TT_RESULTS_FILE = CACHE_DIR / "tt_last_results.pkl"
 _TT_RESULTS_TTL  = 600
 
 def _tt_save(results, ts):
@@ -638,7 +638,7 @@ def fetch_intraday(tickers, interval="15m", force_fresh=False):
         df = fetch_ds_ohlcv(raw_t, interval, 200, True)
         return t, df
 
-    with ThreadPoolExecutor(max_workers=20) as ex:
+    with ThreadPoolExecutor(max_workers=10) as ex:
         futs = {ex.submit(_fetch_one, t): t for t in need_fetch}
         for f in as_completed(futs):
             try:
@@ -944,7 +944,7 @@ with tab_scanner:
                 return t, df
 
             done_count = [0]
-            with ThreadPoolExecutor(max_workers=20) as ex:
+            with ThreadPoolExecutor(max_workers=10) as ex:
                 futs = {ex.submit(_f, t): t for t in need_fetch}
                 for fut in as_completed(futs):
                     try:
@@ -978,7 +978,7 @@ with tab_scanner:
                 if cached is not None: return t, cached
                 df = fetch_ds_ohlcv(raw_t, "daily", 100, False)
                 return t, df
-            with ThreadPoolExecutor(max_workers=20) as ex:
+            with ThreadPoolExecutor(max_workers=10) as ex:
                 futs = {ex.submit(_fd, t): t for t in need_daily}
                 for f in as_completed(futs):
                     try:
@@ -1739,16 +1739,15 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 # JS timer → reload browser otomatis, tidak butuh interaksi user
+# st.rerun() DIHAPUS → bikin infinite loop di Streamlit Cloud!
 if is_open_now and st.session_state.scan_results and st.session_state.last_scan_time:
-    _rem_ms = max(0, int(_rem2 * 1000))
-    _components.html(
-        f"""<script>
-        if(window._tt_timer) clearTimeout(window._tt_timer);
-        window._tt_timer = setTimeout(function(){{
-            window.parent.location.reload();
-        }}, {_rem_ms});
-        </script>""",
-        height=0)
-    # Juga langsung rerun kalau sudah lewat
-    if elapsed_s >= 480:
-        st.rerun()
+    _rem_ms = max(10000, int(_rem2 * 1000))  # min 10 detik
+    if elapsed_s < 600:  # max 10 menit
+        _components.html(
+            f"""<script>
+            if(window._tt_timer) clearTimeout(window._tt_timer);
+            window._tt_timer = setTimeout(function(){{
+                window.parent.location.reload();
+            }}, {_rem_ms});
+            </script>""",
+            height=0)
