@@ -964,6 +964,30 @@ with tab_scanner:
 
             st.session_state.data_dict = data_dict
 
+            # ── Fetch daily data untuk GAIN + VAL yang akurat ──
+            prog_ph.markdown(
+                f'<div style="color:#00e5ff;font-family:Space Mono,monospace;font-size:11px;">'
+                f'📅 Fetching daily context untuk Gain & Val...</div>',
+                unsafe_allow_html=True)
+            daily_dict = {}
+            need_daily = [t for t in ticker_list]
+            def _fd(t):
+                raw_t = t.replace(".JK","").upper()
+                # Try cache first
+                cached = _cache_get(raw_t, "daily")
+                if cached is not None: return t, cached
+                df = fetch_ds_ohlcv(raw_t, "daily", 100, False)
+                return t, df
+            with ThreadPoolExecutor(max_workers=20) as ex:
+                futs = {ex.submit(_fd, t): t for t in need_daily}
+                for f in as_completed(futs):
+                    try:
+                        t, df = f.result(timeout=15)
+                        if df is not None and len(df) >= 2:
+                            daily_dict[t] = df
+                    except: pass
+            st.session_state.daily_dict = daily_dict
+
             # ── PHASE 2: Process ──
             pb.progress(0.85)
             prog_ph.markdown(
@@ -972,6 +996,8 @@ with tab_scanner:
                 unsafe_allow_html=True)
 
             results = []; tickers = list(data_dict.keys())
+            # Fetch daily data dict untuk gain + val yang akurat
+            daily_dict = st.session_state.get("daily_dict", {})
 
             for i, ticker_yf in enumerate(tickers):
                 pb.progress(0.85 + (i+1)/max(len(tickers),1)*0.14)
@@ -981,8 +1007,30 @@ with tab_scanner:
                     df = apply_intraday_indicators(df)
                     r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3] if len(df)>=3 else p
                     close=float(r['Close']); vol=float(r['Volume'])
-                    turnover=close*vol; rvol=float(r['RVOL'])
-                    if turnover<min_turn or rvol<vol_thresh: continue
+
+                    # FIX GAIN: pakai daily D1 kalau ada, bukan 15m ROC
+                    ticker_raw = ticker_yf.replace(".JK","").upper()
+                    df_d = daily_dict.get(ticker_yf) or daily_dict.get(ticker_raw)
+                    if df_d is not None and len(df_d) >= 2:
+                        c1 = float(df_d.iloc[-1]['Close'])
+                        c0 = float(df_d.iloc[-2]['Close'])
+                        gain_pct = (c1 - c0) / max(c0, 1) * 100
+                        # FIX VAL: pakai volume harian
+                        daily_vol = float(df_d.iloc[-1]['Volume'])
+                        turnover = c1 * daily_vol
+                    else:
+                        # Fallback: sum volume 15m hari ini
+                        try:
+                            today = df.index[-1].date()
+                            df_today = df[df.index.date == today]
+                            turnover = close * df_today['Volume'].sum()
+                            gain_pct = float(r.get('ROC3', 0)) * 100
+                        except:
+                            turnover = close * vol
+                            gain_pct = float(r.get('ROC3', 0)) * 100
+
+                    rvol=float(r['RVOL'])
+                    if turnover < min_turn or rvol < vol_thresh: continue
 
                     sig,sc_v2,flags_v2,gc_now = get_sinyal_v2(r,p,p2)
                     aksi_v2 = get_aksi_v2(sig, gc_now, sc_v2)
@@ -997,28 +1045,38 @@ with tab_scanner:
                     e9=float(r['EMA9']); e21=float(r['EMA21']); e50=float(r['EMA50'])
                     trend = "▲ UP" if e9>e21>e50 else("▼ DOWN" if e9<e21<e50 else"◆ SIDE")
 
-                    # Bandarmologi
+                    # FIX ASING: cek FBuy+FSell > 0, bukan threshold 100jt
                     def _sf(v,d=0.):
                         try: x=float(v); return d if(np.isnan(x) or np.isinf(x)) else x
                         except: return d
                     fnet3=_sf(r.get('FNet3',0)); fnet8=_sf(r.get('FNet8',0))
                     fratio=_sf(r.get('FRatio',0.5))
-                    if fnet3>0 and fnet8>0:   fdir="🔵 BELI"
-                    elif fnet3<0 and fnet8<0: fdir="🔴 JUAL"
-                    else:                     fdir="⚪ MIX"
+                    fbuy=_sf(r.get('FBuy',0)); fsell=_sf(r.get('FSell',0))
+                    has_asing = (fbuy + fsell) > 0
+                    if not has_asing:          fdir="—";        fc_="#4a5568"
+                    elif fnet3>0 and fnet8>0:  fdir="🔵 BELI";  fc_="#4da6ff"
+                    elif fnet3<0 and fnet8<0:  fdir="🔴 JUAL";  fc_="#ff3d5a"
+                    else:                      fdir="⚪ MIX";   fc_="#888888"
                     lwick=_sf(r.get('LWick',0))
 
+                    # Val display dari daily turnover
+                    vb = turnover / 1e9
+                    val_str = f"{vb:.1f}B" if vb >= 1 else f"{round(vb*1000,0):.0f}M"
+
                     results.append({
-                        "Ticker":stock_map[ticker_yf],"Price":int(close),"Score":sc,
+                        "Ticker":stock_map.get(ticker_yf, ticker_raw),"Price":int(close),"Score":sc,
                         "Signal":sig,"Sinyal_v2":sig,"Aksi_v2":aksi_v2,
                         "Trend":trend,"RSI-EMA":round(float(r['RSI_EMA']),1),
                         "Stoch K":round(float(r['STOCH_K']),1),"Stoch D":round(float(r['STOCH_D']),1),
                         "MACD Hist":round(float(r['MACD_Hist']),4),"RVOL":round(rvol,2),
-                        "BB%":round(float(r['BB_pct']),2),"ROC 3B%":round(float(r['ROC3'])*100,2),
+                        "BB%":round(float(r['BB_pct']),2),"ROC 3B%":round(gain_pct,2),
+                        "Gain":round(gain_pct,1),
                         "VWAP":int(float(r['VWAP'])),"TP":int(tp),"SL":int(sl),"R:R":round(rr,1),
-                        "Turnover(M)":round(turnover/1e6,1),"Reasons":" · ".join(reasons),
+                        "Turnover(M)":round(turnover/1e6,1),"Val":val_str,
+                        "Reasons":" · ".join(reasons),
                         "_class":get_card_class(sig),"LWick":round(lwick,1),
-                        "FDir":fdir,"FNet3":int(fnet3),"FNet8":int(fnet8),"FRatio":round(fratio,2),
+                        "FDir":fdir,"FC":fc_,
+                        "FNet3":int(fnet3),"FNet8":int(fnet8),"FRatio":round(fratio,2),
                         "sc_v2":sc_v2,"gc_now":gc_now,
                     })
                 except: continue
@@ -1158,7 +1216,7 @@ with tab_scanner:
                 bars=''.join([f'<div class="sc-bar {"filled" if i<sc_int else "empty"}" style="width:28px"></div>' for i in range(6)])
                 roc_c='#00ff88' if row['ROC 3B%']>0 else'#ff3d5a'
                 te="📈" if "▲" in row['Trend'] else("📉" if "▼" in row['Trend'] else"➡️")
-                fd=row.get("FDir","⚪"); fc="#4da6ff" if "BELI" in fd else "#ff3d5a" if "JUAL" in fd else "#4a5568"
+                fd=row.get("FDir","—"); fc=row.get("FC","#4a5568")
                 card_html+=f"""<div class="signal-card {row['_class']}">
                   <div style="display:flex;justify-content:space-between;align-items:flex-start;">
                     <div><div class="sc-ticker">{row['Ticker']}</div>
@@ -1195,7 +1253,7 @@ with tab_scanner:
             rsi_s="UP" if rsi_v>60 else("DEAD" if rsi_v<35 else("DOWN" if rsi_v<45 else "NEU"))
             rsi_c="#00ff88" if rsi_v>60 else"#ff3d5a" if rsi_v<35 else"#ff7b00" if rsi_v<45 else"#4a5568"
             rvol_v=row.get("RVOL",1); rvol_s=f"{rvol_v*100:.0f}%" if rvol_v<10 else f"{rvol_v:.1f}x"
-            fd=row.get("FDir","⚪"); fc="#4da6ff" if "BELI" in fd else"#ff3d5a" if "JUAL" in fd else"#4a5568"
+            fd=row.get("FDir","—"); fc=row.get("FC","#4a5568")
             sinyal_v2=row.get("Sinyal_v2",row.get("Signal","-"))
             aksi_v2=row.get("Aksi_v2","-")
             tp_v=row.get("TP",0); sl_v=row.get("SL",0); price=row.get("Price",0)
