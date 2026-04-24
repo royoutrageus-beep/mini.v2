@@ -168,6 +168,22 @@ def fetch_ds_ohlcv(ticker, interval="15m", limit=200, force_fresh=False):
 # ════════════════════════════════════════════════════
 #  SESSION STATE
 # ════════════════════════════════════════════════════
+# ── Disk persistence for scan results ──
+_TT_RESULTS_FILE = Path.home() / ".hp_cache" / "tt_last_results.pkl"
+_TT_RESULTS_TTL  = 600
+
+def _tt_save(results, ts):
+    try: _TT_RESULTS_FILE.write_bytes(pickle.dumps({"results":results,"ts":ts}))
+    except: pass
+
+def _tt_load():
+    try:
+        if _TT_RESULTS_FILE.exists():
+            d = pickle.loads(_TT_RESULTS_FILE.read_bytes())
+            if time.time()-d["ts"] < _TT_RESULTS_TTL: return d
+    except: pass
+    return None
+
 for _k, _v in [("tt_last_sent", set()), ("wl_results", []),
                 ("wl_mode_used", ""), ("scan_results", []),
                 ("data_dict", {}), ("last_scan_time", None),
@@ -175,6 +191,13 @@ for _k, _v in [("tt_last_sent", set()), ("wl_results", []),
                 ("bsjp_results", []), ("gapup_results", []),
                 ("sector_data", {}), ("beta_data", [])]:
     if _k not in st.session_state: st.session_state[_k] = _v
+
+# Auto-restore dari disk setelah browser refresh
+if not st.session_state.scan_results:
+    _tt_saved = _tt_load()
+    if _tt_saved:
+        st.session_state.scan_results = _tt_saved["results"]
+        st.session_state.last_scan_time = _tt_saved["ts"]
 
 st.set_page_config(layout="wide", page_title="Theta Turbo v5", page_icon="🔥", initial_sidebar_state="collapsed")
 
@@ -276,7 +299,7 @@ raw_stocks = [
     "SPMA","SPTO","SRIL","SRTG","SSIA","SSMS","STAA","STTP","SUNU","SUPR","TBIG","TBLA",
     "TCID","TCPI","TECH","TELE","TGKA","TINS","TKIM","TLKM","TMAS","TOBA","TOWR","TRGU",
     "TRIM","TRIS","TRST","TRUE","TRUK","TSPC","TUGU","UNIC","UNIT","UNTR","UNVR","VOKS",
-    "WBSA","WEGE","WEHA","WICO","WIFI","WIKA","WINE","WINS","WITA","WOOD","WSKT","WTON","ZINC",
+    "WEGE","WEHA","WICO","WIFI","WIKA","WINE","WINS","WITA","WOOD","WSKT","WTON","ZINC",
 ]
 seen = set(); raw_stocks = [x for x in raw_stocks if not (x in seen or seen.add(x))]
 stocks_yf  = [s + ".JK" for s in raw_stocks]
@@ -1004,6 +1027,7 @@ with tab_scanner:
             prog_ph.empty(); pb.empty()
             st.session_state.scan_results = results
             st.session_state.last_scan_time = now_jkt.timestamp()
+            _tt_save(results, st.session_state.last_scan_time)  # persist ke disk
             st.session_state.last_scan_mode = scan_mode
 
             if tele_on and results:
