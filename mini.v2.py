@@ -170,7 +170,7 @@ def fetch_ds_ohlcv(ticker, interval="15m", limit=200, force_fresh=False):
 # ════════════════════════════════════════════════════
 # ── Disk persistence for scan results ──
 _TT_RESULTS_FILE = CACHE_DIR / "tt_last_results.pkl"
-_TT_RESULTS_TTL  = 600
+_TT_RESULTS_TTL  = 1800  # 30 menit — cukup untuk idle antar scan
 
 def _tt_save(results, ts):
     try: _TT_RESULTS_FILE.write_bytes(pickle.dumps({"results":results,"ts":ts}))
@@ -274,105 +274,55 @@ button[data-testid="baseButton-primary"]{background:var(--orange)!important;colo
 #  STOCK LIST
 # ════════════════════════════════════════════════════
 raw_stocks = [
-    "AADI", "AALI", "ABBA", "ABDA", "ABMM", "ACES", "ACRO", "ACST", "ADCP", "ADES", 
-    "ADHI", "ADMF", "ADMG", "ADMR", "ADRO", "AEGS", "AGAR", "AGII", "AGRO", "AGRS", 
-    "AHAP", "AIMS", "AISA", "AKKU", "AKPI", "AKRA", "AKSI", "ALDO", "ALII", "ALKA", 
-    "ALMI", "ALTO", "AMAG", "AMAN", "AMAR", "AMFG", "AMIN", "AMMN", "AMMS", "AMOR", 
-    "AMRT", "ANDI", "ANJT", "ANTM", "APEX", "APIC", "APII", "APLI", "APLN", "ARCI", 
-    "AREA", "ARGO", "ARII", "ARKA", "ARKO", "ARMY", "ARNA", "ARTA", "ARTI", "ARTO", 
-    "ASBI", "ASDM", "ASGR", "ASHA", "ASII", "ASJT", "ASLI", "ASLC", "ASMI", "ASPI", 
-    "ASPR", "ASRI", "ASRM", "ASSA", "ATAP", "ATIC", "ATLA", "AUTO", "AVIA", "AWAN", 
-    "AXIO", "AYAM", "AYLS", "BABA", "BABP", "BABY", "BACA", "BAIK", "BAJA", "BALI", 
-    "BANK", "BAPA", "BAPI", "BATA", "BATR", "BAUT", "BAYU", "BBCA", "BBHI", "BBKP", 
-    "BBLD", "BBMD", "BBNI", "BBRI", "BBRM", "BBSI", "BBSS", "BBTN", "BBYB", "BCAP", 
-    "BCIC", "BCIP", "BDKR", "BDMN", "BEBS", "BEEF", "BEER", "BEKS", "BELI", "BELL", 
-    "BESS", "BEST", "BFIN", "BGTG", "BHAT", "BHIT", "BIAS", "BIKA", "BIKE", "BIMA", 
-    "BINA", "BINO", "BIPI", "BIPP", "BIRD", "BISI", "BIWA", "BJBR", "BJTM", "BKDP", 
-    "BKSL", "BKSW", "BLES", "BLOG", "BLTA", "BLTZ", "BLUE", "BMAS", "BMBL", "BMHS", 
-    "BMRI", "BMSR", "BMTR", "BNBA", "BNBR", "BNGA", "BNII", "BNLI", "BOAT", "BOBA", 
-    "BOGA", "BOLA", "BOLT", "BOSS", "BPFI", "BPII", "BPTR", "BRAM", "BREN", "BRIS", 
-    "BRMS", "BRNA", "BRPT", "BRRC", "BSBK", "BSDE", "BSIM", "BSML", "BSSR", "BSWD", 
-    "BTEK", "BTEL", "BTON", "BTPN", "BTPS", "BUAH", "BUDI", "BUKA", "BUKK", "BULL", 
-    "BUMI", "BUVA", "BVIC", "BWPT", "BYAN", "CAKK", "CAMP", "CANI", "CARE", "CARS", 
-    "CASA", "CASH", "CASS", "CBDK", "CBPE", "CBRE", "CBUT", "CBMF", "CCSI", "CDIA", 
-    "CEKA", "CENT", "CFIN", "CGAS", "CHEK", "CHEM", "CHIP", "CINT", "CITA", "CITY", 
-    "CLAY", "CLEO", "CLPI", "CMNP", "CMNT", "CMPP", "CMRY", "CNKO", "CNMA", "CNTX", 
-    "COAL", "COCO", "COIN", "COWL", "CPIN", "CPRI", "CPRO", "CRAB", "CRSN", "CSAP", 
-    "CSIS", "CSMI", "CSRA", "CTBN", "CTRA", "CTTH", "CUAN", "CYBR", "DAAZ", "DADA", 
-    "DART", "DATA", "DAYA", "DCII", "DEAL", "DEFI", "DEPO", "DEWA", "DEWI", "DFAM", 
-    "DGNS", "DGWG", "DGIK", "DIGI", "DILD", "DIVA", "DKFT", "DKHH", "DLTA", "DMAS", 
-    "DMMX", "DMND", "DNAR", "DNET", "DOID", "DOOH", "DOSS", "DPNS", "DPUM", "DRMA", 
-    "DSFI", "DSNG", "DSSA", "DUCK", "DUTI", "DVLA", "DWGL", "DYAN", "EAST", "ECII", 
-    "EDGE", "EKAD", "ELIT", "ELPI", "ELSA", "ELTY", "EMAS", "EMDE", "EMTK", "ENAK", 
-    "ENRG", "ENVY", "ENZO", "EPAC", "EPMT", "ERAL", "ERAA", "ERTX", "ESIP", "ESSA", 
-    "ESTA", "ESTI", "ETWA", "EURO", "EXCL", "FAPA", "FAST", "FASW", "FILM", "FIMP", 
-    "FIRE", "FISH", "FITT", "FLMC", "FOLK", "FOOD", "FORE", "FORU", "FPNI", "FUJI", 
-    "FUTR", "FWCT", "GAMA", "GDST", "GDYR", "GEMA", "GEMS", "GGRP", "GGRM", "GHON", 
-    "GIAA", "GJTL", "GLOB", "GLVA", "GMFI", "GMTD", "GOLF", "GOLD", "GOLL", "GOOD", 
-    "GOTO", "GPRA", "GPSO", "GRIA", "GRPH", "GRPM", "GRII", "GSMF", "GTBO", "GTRA", 
-    "GTSI", "GULA", "GUNA", "GWSA", "GZCO", "HADE", "HAIS", "HAJJ", "HALO", "HATM", 
-    "HBAT", "HDFA", "HDIT", "HEAL", "HELI", "HERO", "HEXA", "HGII", "HILL", "HITS", 
-    "HKMU", "HMSP", "HOKI", "HOME", "HOMI", "HOPE", "HOTL", "HRME", "HRTA", "HRUM", 
-    "HUMI", "HYGN", "IATA", "IBFN", "IBOS", "IBST", "ICBP", "ICON", "IDEA", "IDPR", 
-    "IFII", "IFSH", "IGAR", "IIKP", "IKAI", "IKAN", "IKBI", "IKPM", "IMAS", "IMJS", 
-    "IMPC", "INAF", "INAI", "INCF", "INCI", "INCO", "INDF", "INDO", "INDR", "INDS", 
-    "INDX", "INDY", "INET", "INKP", "INOV", "INPC", "INPP", "INPS", "INRU", "INTA", 
-    "INTD", "INTP", "IOTF", "IPAC", "IPCC", "IPCM", "IPOL", "IPPE", "IPTV", "IRRA", 
-    "IRSX", "ISAP", "ISAT", "ISEA", "ISSP", "ITIC", "ITMA", "ITMG", "JAAS", "JARR", 
-    "JAST", "JATI", "JAVA", "JAYA", "JECC", "JGLE", "JIHD", "JKON", "JMAS", "JPFA", 
-    "JRPT", "JSKY", "JSMR", "JSPT", "JTPE", "KAEF", "KAQI", "KARW", "KARY", "KAST", 
-    "KAYU", "KBAG", "KBLI", "KBLM", "KBLV", "KBRI", "KDSI", "KDTN", "KEEN", "KEJU", 
-    "KETR", "KIAS", "KICI", "KIJA", "KING", "KINO", "KIOS", "KJEN", "KKES", "KKGI", 
-    "KLAS", "KLBF", "KLIN", "KMDS", "KMTR", "KOBX", "KOCI", "KOIN", "KOKA", "KONI", 
-    "KOPI", "KOTA", "KPIG", "KRAH", "KRAS", "KREN", "KSIX", "KUAS", "LABA", "LABS", 
-    "LAJU", "LAND", "LAPD", "LCGP", "LCKM", "LEAD", "LFLO", "LIFE", "LINK", "LION", 
-    "LIVE", "LMAS", "LMPI", "LMSH", "LOPI", "LPCK", "LPGI", "LPIN", "LPKR", "LPLI", 
-    "LPPF", "LPPS", "LRNA", "LSIP", "LTLS", "LUCK", "LUCY", "MAAS", "MABA", "MADA", 
-    "MAGP", "MAHA", "MAIN", "MANG", "MAPA", "MAPB", "MAPI", "MARI", "MARK", "MASA", 
-    "MASB", "MAYA", "MBAP", "MBMA", "MBSS", "MBTO", "MCAS", "MCOL", "MCOR", "MDIA", 
-    "MDKA", "MDKI", "MDLA", "MDLN", "MDRN", "MEDC", "MEDS", "MEGA", "MEJA", "MENN", 
-    "MERI", "MERK", "META", "MFMI", "MGNA", "MGRO", "MHKI", "MICE", "MIDI", "MIKA", 
-    "MINA", "MINE", "MIRA", "MITI", "MKAP", "MKPI", "MKTR", "MLBI", "MLIA", "MLPL", 
-    "MLPT", "MMLP", "MMIX", "MNCN", "MOLI", "MORA", "MPOW", "MPMX", "MPPA", "MPRO", 
-    "MPXL", "MRAT", "MREI", "MSIE", "MSIN", "MSJA", "MSKY", "MSTI", "MTDL", "MTEL", 
-    "MTFN", "MTLA", "MTMH", "MTPS", "MTRA", "MTRN", "MTSM", "MTWI", "MUTU", "MYOH", 
-    "MYOR", "MYTX", "NAIK", "NANO", "NASA", "NASI", "NATO", "NAYZ", "NCKL", "NELY", 
-    "NEST", "NETV", "NICE", "NICK", "NICL", "NIKL", "NINE", "NIRO", "NISP", "NOBU", 
-    "NPGF", "NRCA", "NSSS", "NTBK", "NUSA", "NZIA", "OASA", "OBAT", "OBMD", "OCAP", 
-    "OILS", "OKAS", "OLIV", "OMED", "OMRE", "OPMS", "PACK", "PADA", "PADI", "PALM", 
-    "PAMG", "PANI", "PANR", "PANS", "PART", "PBID", "PBSA", "PBRX", "PCAR", "PDES", 
-    "PDPP", "PEGE", "PEHA", "PELI", "PENT", "PERW", "PEVE", "PGAS", "PGEO", "PGJO", 
-    "PGLI", "PGUN", "PICO", "PIPA", "PJAA", "PJHB", "PKPK", "PLAN", "PLAS", "PLIN", 
-    "PMJS", "PMMP", "PMUI", "PNBN", "PNBS", "PNGO", "PNIN", "PNLF", "PNSE", "POLA", 
-    "POLI", "POLL", "POLU", "POLY", "POOL", "PORT", "POSA", "POWR", "PPGL", "PPRI", 
-    "PPRE", "PPRO", "PRAY", "PRDA", "PRIM", "PSAB", "PSAT", "PSDN", "PSGO", "PSKT", 
-    "PSSI", "PTBA", "PTDU", "PTIS", "PTMP", "PTMR", "PTPP", "PTPS", "PTPW", "PTRO", 
-    "PTSN", "PTSP", "PUDP", "PURA", "PURE", "PURI", "PWON", "PYFA", "PZZA", "RAAM", 
-    "RAFI", "RAJA", "RALS", "RANC", "RATU", "RBMS", "RCCC", "RDTX", "REAL", "RELF", 
-    "RELI", "REPP", "RGAS", "RICY", "RIGS", "RIMO", "RISE", "RLCO", "RMBA", "RMKE", 
-    "RMKO", "RMLP", "ROCK", "RODA", "ROLI", "RONY", "ROTI", "RSCH", "RSGK", "RUIS", 
-    "RUNS", "SAFE", "SAGE", "SAGI", "SAME", "SAMF", "SAMR", "SAMP", "SANO", "SAPX", 
-    "SATU", "SBAT", "SBMA", "SCCO", "SCMA", "SCNP", "SCPI", "SDMU", "SDPC", "SDRA", 
-    "SEMA", "SFAN", "SGER", "SGGH", "SGJL", "SGRO", "SHID", "SHIP", "SICO", "SIDO", 
-    "SIER", "SILO", "SIMA", "SIMP", "SINI", "SIPD", "SKBM", "SKLT", "SKRN", "SKYB", 
-    "SLIS", "SMAR", "SMDM", "SMDR", "SMGA", "SMGR", "SMKM", "SMKL", "SMLE", "SMMA", 
-    "SMMT", "SMRA", "SMRU", "SMSM", "SNLK", "SOCI", "SOFA", "SOHO", "SOLA", "SONA", 
-    "SOSS", "SOTS", "SOUL", "SPMA", "SPRE", "SPTO", "SQMI", "SRAJ", "SREI", "SRIL", 
-    "SRSN", "SRTG", "SSIA", "SSMS", "SSTM", "STAA", "STAR", "STRK", "STTP", "SUGI", 
-    "SULI", "SUNI", "SUPA", "SUPR", "SURE", "SWAT", "SWID", "SYAI", "TALF", "TAMA", 
-    "TAMU", "TAPG", "TARA", "TAXI", "TAYS", "TBIG", "TBLA", "TBMS", "TCID", "TCPI", 
-    "TDPM", "TEBE", "TECH", "TELE", "TFAS", "TFCO", "TGKA", "TGRA", "TGUK", "TIFA", 
-    "TINS", "TIRA", "TIRT", "TKIM", "TLDN", "TLKM", "TMAS", "TMPO", "TNCA", "TOBA", 
-    "TOOL", "TOPS", "TOSK", "TOTL", "TOTO", "TOWR", "TOYS", "TPAI", "TPIA", "TPMA", 
-    "TRAM", "TRGU", "TRIL", "TRIM", "TRIN", "TRIO", "TRIS", "TRJA", "TRON", "TRST", 
-    "TRUE", "TRUK", "TRUS", "TSPC", "TUGU", "TULT", "TYRE", "UANG", "UCID", "UDNG", 
-    "UFOE", "ULTJ", "UNIC", "UNIQ", "UNIT", "UNSP", "UNTR", "UNVR", "URBN", "UVCR", 
-    "VAST", "VATE", "VCOK", "VERN", "VICI", "VICO", "VINS", "VISA", "VISI", "VIVA", 
-    "VKTR", "VOKS", "VOSS", "VRNA", "VTNY", "WAPO", "WBSA", "WEGE", "WEHA", "WGSH", 
-    "WICO", "WIDI", "WIFI", "WIIM", "WIKA", "WINE", "WINR", "WINS", "WIRG", "WITA", 
-    "WMPP", "WMUU", "WOMF", "WONS", "WOOD", "WOWS", "WPOW", "WSBP", "WSKT", "WTON", 
-    "YELO", "YOII", "YPAS", "YULE", "YUPI", "ZATA", "ZBRA", "ZENI", "ZINC", "ZONE", 
-    "ZYRX"
+    "AALI","ABBA","ABDA","ABMM","ACES","ACST","ADCP","ADES","ADHI","ADMF","ADMG","ADMR","ADRO","AGII","AGRO","AGRS",
+    "AHAP","AIMS","AISA","AKPI","AKRA","AKSI","ALDO","ALKA","ALMI","ALRE","AMAG","AMAR","AMFG","AMIN","AMMS","AMOR",
+    "AMRT","ANDI","ANJT","ANTM","APEX","APIC","APLI","APLN","ARCI","ARGO","ARII","ARKA","ARKO","ARMY","ARNA","ARTA",
+    "ARTI","ARTO","ASBI","ASCL","ASDM","ASGR","ASII","ASJT","ASLC","ASMI","ASPI","ASRI","ASRM","ASSA","ATAP","ATIC",
+    "ATLI","AUTO","AVIA","AWAN","AXIO","AYLS","BABP","BACA","BAIC","BAPA","BAPI","BARI","BATA","BATU","BAYU","BBCA",
+    "BBHI","BBKP","BBLD","BBMD","BBNI","BBRI","BBRM","BBSI","BBSS","BBTN","BBYB","BCAP","BCIC","BCIP","BDMN","BEBS",
+    "BEEF","BEER","BELI","BESS","BEST","BFIN","BGTG","BHIT","BIAS","BVIC","BIKA","BIMA","BINA","BIPI","BIPP","BIRD",
+    "BISI","BJBR","BJTM","BKDP","BKSL","BKSW","BLTA","BLTZ","BLUE","BMAS","BMBL","BMRI","BMTR","BNBA","BNGA","BNII",
+    "BNLI","BOBA","BOGA","BOKE","BOLA","BORO","BOSS","BPFI","BPII","BPTR","BRAM","BRIS","BRMS","BRNA","BRPT","BSDE",
+    "BSIM","BSML","BSSR","BSWD","BTEK","BTEL","BTON","BTPS","BUDI","BUKK","BULL","BUMI","BUVA","BWPT","BYAN","CAKK",
+    "CAMP","CARS","CASH","CASS","CASY","CBRE","CEKA","CENT","CERE","CESS","CFIN","CHIP","CINT","CITA","CITY","CLAY",
+    "CLEO","CLPI","CMNT","CMPP","CMRY","CNKO","CNMA","CNTX","COAL","COCO","CPIN","CPRI","CPRO","CSAP","CSIS","CSMI",
+    "CSRA","CTBN","CTRA","CTRP","CTRS","CTTH","CUAN","DADA","DAJK","DART","DAYA","DEAL","DEFI","DEIT","DEWA","DFAM",
+    "DGIK","DGNS","DIGI","DILD","DIVA","DKFT","DLTA","DMMX","DMND","DMSX","DMTX","DNAR","DNET","DOID","DPNS","DPUM",
+    "DRMA","DSSA","DSST","DUCK","DUTI","DVLA","DWGL","DYAN","EAST","ECII","EDII","EKAD","ELIT","ELPI","ELSA","ELTY",
+    "EMAS","EMTK","ENRG","EPAC","EPMT","ERAA","ERTX","ESIP","ESSA","ESTA","ESTI","ETWA","EURO","EVIT","EXCL","FAPA",
+    "FAST","FASW","FEST","FIFA","FIMP","FIRE","FISH","FITT","FLMC","FMII","FORU","FORZ","FPNI","FREN","FUAD","FWCT",
+    "GAMA","GDST","GDYR","GEAS","GEMA","GEMS","GGRM","GGRP","GHON","GIAA","GJTL","GLOB","GLVA","GMCU","GMTD","GOLD",
+    "GOOD","GOTO","GPRA","GPSO","GRIA","GRPM","GSMF","GTBO","GWSA","GZCO","HADE","HAIS","HALO","HATM","HDFA","HDIT",
+    "HEAL","HELI","HERO","HEXA","HHPW","HIAM","HITS","HKMU","HMSP","HOKI","HOME","HOPE","HOTL","HRTA","HRUM","IATA",
+    "IBFN","IBOS","ICBP","ICON","IDPR","IFII","IFSH","IGAR","IIKP","IKAI","IKAN","IKBI","IMAS","IMJS","IMPC","INAF",
+    "INAI","INCF","INCO","INDF","INDO","INET","INFN","INFO","INPC","INPP","INPS","INRU","INSG","INTA","INTD","INTP",
+    "IPAC","IPCC","IPCM","IPPE","IPTV","IRRA","ISAP","ISAT","ISIG","ISSP","ITIC","ITMA","ITMG","JAST","JATI","JAVA",
+    "JECC","JGLE","JIHD","JKON","JKSW","JMAS","JPFA","JRPT","JSMR","JSPT","JTPE","KAEF","KARY","KAYU","KBAG","KBLI",
+    "KBLM","KBLV","KBMD","KDSI","KEEN","KEJU","KIAS","KICI","KIJA","KING","KINO","KIOS","KJEN","KKGI","KLAS","KLBF",
+    "KMDS","KMTR","KOBX","KOIN","KOKA","KOKI","KONI","KOPI","KOTA","KPAS","KPIG","KRAH","KRAS","KREN","LAAW","LABA",
+    "LAND","LAPD","LCGP","LCKM","LEAD","LIFE","LION","LPCK","LPGI","LPIN","LPKR","LPLI","LPPS","LPPF","LRNA","LSIP",
+    "LTLS","LUCK","LUCY","MABA","MAGP","MAHA","MAIN","MAMI","MAPA","MAPB","MAPI","MARI","MARK","MASA","MAYA","MBAP",
+    "MBMA","MBSS","MBTO","MCAS","MCOL","MCOR","MDIA","MDKA","MDKI","MDLN","MDPP","MEDC","MEGA","MENN","METI","METR",
+    "METS","MFIN","MFMI","MGNA","MICE","MIDI","MIKA","MINA","MIRA","MITI","MKAP","MKNT","MKPI","MLBI","MLIA","MLMS",
+    "MLPL","MLPT","MMIX","MNCN","MPMX","MPPA","MPRO","MRAT","MREI","MSIN","MSKY","MTDL","MTEL","MTFN","MTLA","MTMH",
+    "MTPS","MTRA","MTSM","MYOH","MYOR","MYPZ","MYRX","MYTX","NANO","NASA","NARE","NATO","NELY","NETV","NFCX","NICK",
+    "NICL","NIRO","NISM","NKEF","NKIT","NLMS","NOBU","NPGF","NRCA","NSSS","NTBK","NUSA","NVAM","NZIA","OASA","OBMD",
+    "OCAP","OCAS","OCDM","OKAS","OLIV","OMRE","OPMS","PADI","PAFI","PAMG","PANI","PANR","PANS","PANT","PARD","PARE",
+    "PBID","PBRX","PBSA","PCAR","PDES","PEGE","PEHA","PELI","PESS","PGAS","PGEO","PGUN","PICO","PJAA","PKPK","PLIN",
+    "PLNB","PLSN","PMJS","PMMP","PNBS","PNIN","PNLF","PNSE","POLA","POLL","POLU","POLY","POOL","PORT","POWR","PPGL",
+    "PPRE","PPRO","PRAS","PRDA","PRIM","PSAB","PSDN","PSGO","PSKT","PSSI","PTBA","PTDU","PTIS","PTPW","PTRO","PTSN",
+    "PTSP","PUDP","PURA","PURE","PURI","PWON","PYFA","RAAM","RACY","RAJA","RALS","RANC","RBMS","RCCC","RELI","REMA",
+    "RGAS","RICY","RIGS","RIMO","RISE","RMKE","RMKO","RODA","RONI","ROTI","SAFE","SAME","SAMF","SAMI","SANK","SANT",
+    "SAPX","SBAT","SBMA","SCCO","SCMA","SCNP","SCRB","SDMU","SDPC","SDRA","SEMA","SGER","SGRO","SHID","SHIP","SIAP",
+    "SILO","SIMA","SIMP","SINI","SIPD","SKBM","SKLT","SKYB","SLIS","SMAR","SMBR","SMCB","SMDM","SMDR","SMGR","SMMA",
+    "SMMT","SMRA","SMRU","SMSM","SNLK","SOFA","SOHO","SONA","SOSS","SOTS","SPMA","SPTO","SQMI","SRAJ","SRIL","SRTG",
+    "SSIA","SSMS","SSTM","STAA","STTP","SUGI","SULI","SUMI","SUNU","SUPR","SURE","SURV","SUTI","SWAT","SWID","TAMA",
+    "TAMU","TARA","TAXI","TBIG","TBLA","TBMS","TCID","TCOA","TCPI","TEBE","TECC","TECH","TELE","TFAS","TFCO","TGKA",
+    "TGUK","TIFA","TINS","TIRA","TIRT","TKIM","TLDN","TLKM","TMAS","TMPO","TNCA","TOBA","TOOL","TOTA","TOWR","TPAI",
+    "TPMA","TRGU","TRIL","TRIM","TRIN","TRIS","TRJA","TRST","TRUE","TRUK","TRUS","TSPC","TUGU","TULI","TYRE","UANG",
+    "UCID","UNIC","UNIT","UNSP","UNTR","UNVR","URBN","UVCR","VICI","VICO","VINS","VIPT","VIVA","VOKS","VOMR","VTNY",
+    "WAPO","WEGE","WEHA","WICO","WIDI","WIFI","WIGL","WIKA","WIKI","WIMM","WINE","WINS","WIRG","WITA","WMUU","WOOD",
+    "WOWS","WSBP","WSKT","WTON","YELO","YPAS","YULE","ZATA","ZBRA","ZINC"
 ]
 seen = set(); raw_stocks = [x for x in raw_stocks if not (x in seen or seen.add(x))]
 stocks_yf  = [s + ".JK" for s in raw_stocks]
@@ -973,7 +923,7 @@ with tab_scanner:
     auto_trigger = False
     if st.session_state.last_scan_time and not do_scan_btn:
         _elapsed = _now_check - st.session_state.last_scan_time
-        if _elapsed >= 300 and st.session_state.scan_results and is_open:
+        if _elapsed >= 480 and st.session_state.scan_results and is_open:
             auto_trigger = True
 
     if do_scan_btn or auto_trigger:
@@ -1813,9 +1763,11 @@ st.markdown(f"""
 
 # JS timer → reload browser otomatis, tidak butuh interaksi user
 # st.rerun() DIHAPUS → bikin infinite loop di Streamlit Cloud!
+# KUNCI: hanya inject timer kalau BELUM waktunya reload (elapsed < 480)
+# Kalau elapsed >= 480 → auto_trigger sudah handle rescan, jangan loop!
 if is_open_now and st.session_state.scan_results and st.session_state.last_scan_time:
-    _rem_ms = max(10000, int(_rem2 * 1000))  # min 10 detik
-    if elapsed_s < 600:  # max 10 menit
+    if elapsed_s < 480:  # hanya kalau belum waktunya
+        _rem_ms = max(10000, int(_rem2 * 1000))  # min 10 detik
         _components.html(
             f"""<script>
             if(window._tt_timer) clearTimeout(window._tt_timer);
