@@ -1200,96 +1200,119 @@ with tab_scanner:
                 f'⚡ {n_cached} dari cache · {n_need} perlu fetch · 10 threads...</div>',
                 unsafe_allow_html=True)
 
-            # Parallel fetch 10 threads (thread-safe karena disk cache)
+            # ── DS API parallel — hanya kalau DS_KEY ada ──
             def _f(t):
                 raw_t = t.replace(".JK","").upper()
                 if DS_KEY:
                     df = fetch_ds_ohlcv(raw_t, "15m", 200, True)
                     if df is not None: return t, df
-                return t, None  # DS fallback handled in batch below
+                return t, None
 
             done_count = [0]
-            with ThreadPoolExecutor(max_workers=10) as ex:
-                futs = {ex.submit(_f, t): t for t in need_fetch}
-                for fut in as_completed(futs):
-                    try:
-                        t, df = fut.result(timeout=15)
-                        done_count[0] += 1
-                        if df is not None and len(df) >= 20:
-                            data_dict[t] = df
-                        # Update progress setiap 20 ticker
-                        if done_count[0] % 20 == 0:
-                            pct = 0.1 + (done_count[0] / max(n_need, 1)) * 0.70
-                            pb.progress(min(pct, 0.80))
-                            prog_ph.markdown(
-                                f'<div style="color:#ff7b00;font-family:Space Mono,monospace;font-size:11px;">'
-                                f'⚡ Fetched {done_count[0]}/{n_need} · {len(data_dict)} berhasil...</div>',
-                                unsafe_allow_html=True)
-                    except: done_count[0] += 1
+            src_label = "DataSectors ⚡" if DS_KEY else "—"
+            prog_ph.markdown(
+                f'<div style="color:#ff7b00;font-family:Space Mono,monospace;font-size:11px;">'
+                f'⚡ {n_cached} cache · {n_need} fetch · [{src_label}]...</div>',
+                unsafe_allow_html=True)
 
-            # ── yFinance BATCH FALLBACK jika DS_KEY kosong atau data kurang ──
-            if not DS_KEY and not data_dict:
+            if need_fetch:
+                with ThreadPoolExecutor(max_workers=10) as ex:
+                    futs = {ex.submit(_f, t): t for t in need_fetch}
+                    for fut in as_completed(futs):
+                        try:
+                            t, df = fut.result(timeout=15)
+                            done_count[0] += 1
+                            if df is not None and len(df) >= 20:
+                                data_dict[t] = df
+                            if done_count[0] % 30 == 0:
+                                pct = 0.10 + (done_count[0] / max(n_need, 1)) * 0.40
+                                pb.progress(min(pct, 0.50))
+                                prog_ph.markdown(
+                                    f'<div style="color:#ff7b00;font-family:Space Mono,monospace;font-size:11px;">' 
+                                    f'⚡ DS fetch {done_count[0]}/{n_need} · {len(data_dict)} berhasil...</div>',
+                                    unsafe_allow_html=True)
+                        except: done_count[0] += 1
+
+            # ══ CRITICAL FIX: yFinance BATCH FALLBACK ══
+            # Selalu jalan untuk SEMUA ticker yang masih missing
+            # Covers: DS_KEY kosong, DS API fail, rate-limit, dll
+            missing_yf = [t for t in ticker_list if t not in data_dict]
+            if missing_yf:
                 prog_ph.markdown(
-                    '<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">'
-                    '📊 DS_KEY tidak ada → fallback ke yFinance batch...</div>',
+                    f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">' 
+                    f'📊 yFinance fallback: {len(missing_yf)} ticker missing → batch download...</div>',
                     unsafe_allow_html=True)
-                for i_yf in range(0, len(ticker_list), 25):
-                    batch_yf = ticker_list[i_yf:i_yf+25]
-                    try:
-                        raw_yf = yf.download(batch_yf, period="5d", interval="15m",
-                                             group_by='ticker', progress=False,
-                                             threads=True, auto_adjust=True)
-                        for t_yf in batch_yf:
-                            try:
-                                df_yf = raw_yf[t_yf].dropna() if len(batch_yf)>1 else raw_yf.dropna()
-                                if isinstance(df_yf.columns, pd.MultiIndex): df_yf.columns = df_yf.columns.droplevel(1)
-                                if len(df_yf) >= 20: data_dict[t_yf] = df_yf
-                            except: pass
-                    except: pass
-                    pb.progress(min(0.80, 0.10 + (i_yf+25)/len(ticker_list)*0.70))
-            elif not DS_KEY:
-                # Partial fallback: fetch yang belum ada
-                missing_yf = [t for t in ticker_list if t not in data_dict]
                 for i_yf in range(0, len(missing_yf), 25):
                     batch_yf = missing_yf[i_yf:i_yf+25]
                     try:
-                        raw_yf = yf.download(batch_yf, period="5d", interval="15m",
-                                             group_by='ticker', progress=False,
-                                             threads=True, auto_adjust=True)
+                        raw_yf = yf.download(
+                            batch_yf, period="5d", interval="15m",
+                            group_by='ticker', progress=False,
+                            threads=True, auto_adjust=True)
                         for t_yf in batch_yf:
                             try:
-                                df_yf = raw_yf[t_yf].dropna() if len(batch_yf)>1 else raw_yf.dropna()
-                                if isinstance(df_yf.columns, pd.MultiIndex): df_yf.columns = df_yf.columns.droplevel(1)
-                                if len(df_yf) >= 20: data_dict[t_yf] = df_yf
+                                if len(batch_yf) > 1:
+                                    df_yf = raw_yf[t_yf].dropna()
+                                else:
+                                    df_yf = raw_yf.copy()
+                                if isinstance(df_yf.columns, pd.MultiIndex):
+                                    df_yf.columns = df_yf.columns.droplevel(1)
+                                if len(df_yf) >= 20:
+                                    data_dict[t_yf] = df_yf
                             except: pass
                     except: pass
+                    pct = 0.50 + (i_yf + 25) / max(len(missing_yf), 1) * 0.25
+                    pb.progress(min(pct, 0.76))
+                    time.sleep(0.3)
 
             st.session_state.data_dict = data_dict
-
-            # ── Fetch daily data untuk GAIN + VAL yang akurat ──
             prog_ph.markdown(
-                f'<div style="color:#00e5ff;font-family:Space Mono,monospace;font-size:11px;">'
-                f'📅 Fetching daily context untuk Gain & Val...</div>',
+                f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">' 
+                f'✅ Data siap: {len(data_dict)} saham (target: {len(ticker_list)})</div>',
                 unsafe_allow_html=True)
+            pb.progress(0.78)
+
+            # ── Daily context untuk GAIN + VAL ──
             daily_dict = {}
-            need_daily = [t for t in ticker_list]
-            def _fd(t):
-                raw_t = t.replace(".JK","").upper()
-                # Try cache first
-                cached = _cache_get(raw_t, "daily")
-                if cached is not None: return t, cached
-                df = fetch_ds_ohlcv(raw_t, "daily", 100, False)
-                return t, df
-            with ThreadPoolExecutor(max_workers=10) as ex:
-                futs = {ex.submit(_fd, t): t for t in need_daily}
-                for f in as_completed(futs):
+            # DS daily dulu
+            if DS_KEY:
+                def _fd(t):
+                    raw_t = t.replace(".JK","").upper()
+                    cached = _cache_get(raw_t, "daily")
+                    if cached is not None: return t, cached
+                    df = fetch_ds_ohlcv(raw_t, "daily", 100, False)
+                    return t, df
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    futs = {ex.submit(_fd, t): t for t in list(data_dict.keys())}
+                    for f in as_completed(futs):
+                        try:
+                            t, df = f.result(timeout=12)
+                            if df is not None and len(df) >= 2:
+                                daily_dict[t] = df
+                        except: pass
+            # yFinance daily fallback untuk yang masih belum ada
+            missing_daily = [t for t in list(data_dict.keys()) if t not in daily_dict]
+            if missing_daily:
+                for i_d in range(0, min(len(missing_daily), 300), 30):
+                    batch_d = missing_daily[i_d:i_d+30]
                     try:
-                        t, df = f.result(timeout=15)
-                        if df is not None and len(df) >= 2:
-                            daily_dict[t] = df
+                        raw_d = yf.download(
+                            batch_d, period="5d", interval="1d",
+                            group_by='ticker', progress=False,
+                            threads=True, auto_adjust=True)
+                        for t_d in batch_d:
+                            try:
+                                if len(batch_d) > 1:
+                                    df_d = raw_d[t_d].dropna()
+                                else:
+                                    df_d = raw_d.copy()
+                                if isinstance(df_d.columns, pd.MultiIndex):
+                                    df_d.columns = df_d.columns.droplevel(1)
+                                if len(df_d) >= 2:
+                                    daily_dict[t_d] = df_d
+                            except: pass
                     except: pass
             st.session_state.daily_dict = daily_dict
-
             # ── PHASE 2: Process ──
             pb.progress(0.85)
             prog_ph.markdown(
