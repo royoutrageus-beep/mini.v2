@@ -1555,10 +1555,13 @@ with tab_scanner:
             card_html='<div class="signal-grid">'
             for _,row in df_out.head(20).iterrows():
                 sc_int=int(row['Score'])
-                bars=''.join([f'<div class="sc-bar {"filled" if i<sc_int else "empty"}" style="width:28px"></div>' for i in range(6)])
+                is_bag="BAGGER" in row['Signal'] or "KANDIDAT" in row['Signal']
+                bar_cls="filled-purple" if is_bag else "filled"
+                bars=''.join([f'<div class="sc-bar {bar_cls if i<sc_int else "empty"}" style="width:28px"></div>' for i in range(6)])
                 roc_c='#00ff88' if row['ROC 3B%']>0 else'#ff3d5a'
                 te="📈" if "▲" in row['Trend'] else("📉" if "▼" in row['Trend'] else"➡️")
                 fd=row.get("FDir","—"); fc=row.get("FC","#4a5568")
+                sig_color='#bf5fff' if is_bag else('#00ff88' if sc_int>=5 else '#ffb700' if sc_int>=4 else '#00e5ff')
                 card_html+=f"""<div class="signal-card {row['_class']}">
                   <div style="display:flex;justify-content:space-between;align-items:flex-start;">
                     <div><div class="sc-ticker">{row['Ticker']}</div>
