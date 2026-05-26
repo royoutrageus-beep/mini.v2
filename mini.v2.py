@@ -388,26 +388,74 @@ stock_map  = {s + ".JK": s for s in raw_stocks}
 # ════════════════════════════════════════════════════
 #  MARKET REGIME
 # ════════════════════════════════════════════════════
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)   # 5 menit — lebih responsif
 def get_market_regime():
     try:
         df = yf.download("^JKSE", period="60d", interval="1d",
-                         progress=False, auto_adjust=True, timeout=8)
+                         progress=False, auto_adjust=True, timeout=10)
         if df is None or len(df) < 10:
-            return ("UNKNOWN", 0, 0, 0, "Data kurang", 0.0)
-        close = df["Close"].squeeze()
+            return ("UNKNOWN", 0, 0, 0, "Data IHSG kurang", 0.0)
+
+        # FIX: handle MultiIndex columns dari yfinance terbaru
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+
+        # FIX: squeeze() bisa return DataFrame kalau ada MultiIndex sisa
+        close = df["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
+
+        if len(close) < 10:
+            return ("UNKNOWN", 0, 0, 0, "Data close kurang", 0.0)
+
         ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
         ema55 = float(close.ewm(span=min(55, len(close)-1), adjust=False).mean().iloc[-1])
         price = float(close.iloc[-1])
         chg   = float(((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) * 100)
-        if price < ema20:
-            return ("RED",      price, ema20, ema55, f"IHSG {price:,.0f} < EMA20 → Bearish", chg)
-        elif price > ema20 and price > ema55:
-            return ("GREEN",    price, ema20, ema55, f"IHSG {price:,.0f} > EMA20 & EMA55 → Bullish", chg)
+
+        # ─── REGIME LOGIC YANG LEBIH PRESISI ───
+        # Band ±1.2%: price dalam range EMA20±1.2% → jangan langsung RED
+        band      = 0.012
+        pct_vs_e20 = (price - ema20) / ema20 * 100  # % posisi vs EMA20
+        pct_vs_e55 = (price - ema55) / ema55 * 100
+
+        above_e20_clear = price > ema20 * (1 + band)   # jelas di atas EMA20
+        above_e20_any   = price > ema20 * (1 - band)   # di atas EMA20 ± band
+        above_e55       = price > ema55
+
+        # Momentum: hari ini naik > 0.3% = tidak bisa RED
+        recovering      = chg > 0.3
+        # Bearish: turun > 0.3% AND jelas di bawah EMA20
+        bearish_confirm = chg < -0.3 and not above_e20_any
+
+        if above_e20_clear and above_e55:
+            regime = "GREEN"
+            detail = f"IHSG {price:,.0f} di atas EMA20 & EMA55 → Bullish ✅ ({pct_vs_e20:+.1f}% vs EMA20)"
+        elif above_e20_any and above_e55:
+            # Di dekat EMA20 tapi sudah di atas EMA55 → masih GREEN
+            regime = "GREEN"
+            detail = f"IHSG {price:,.0f} dekat EMA20({ema20:,.0f}) & di atas EMA55 → Bullish"
+        elif above_e20_any and not above_e55:
+            # Di atas EMA20 tapi di bawah EMA55 → SIDEWAYS
+            regime = "SIDEWAYS"
+            detail = f"IHSG {price:,.0f} > EMA20 tapi < EMA55({ema55:,.0f}) → Sideways"
+        elif not above_e20_any and recovering:
+            # Di bawah EMA20 TAPI hari ini naik = sedang recovery → SIDEWAYS bukan RED
+            regime = "SIDEWAYS"
+            detail = f"IHSG {price:,.0f} recovery {chg:+.2f}% (EMA20={ema20:,.0f}, gap {pct_vs_e20:+.1f}%)"
+        elif bearish_confirm:
+            # Jelas bearish: di bawah EMA20 + hari ini turun juga
+            regime = "RED"
+            detail = f"IHSG {price:,.0f} < EMA20({ema20:,.0f}) {pct_vs_e20:+.1f}% + turun {chg:.2f}% → Bearish"
         else:
-            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} antara EMA20-EMA55", chg)
-    except:
-        return ("UNKNOWN", 0, 0, 0, "IHSG tidak tersedia", 0.0)
+            # Di bawah EMA20 tapi flat → SIDEWAYS
+            regime = "SIDEWAYS"
+            detail = f"IHSG {price:,.0f} sedikit di bawah EMA20({ema20:,.0f}) {pct_vs_e20:+.1f}% → Sideways"
+
+        return (regime, price, ema20, ema55, detail, chg)
+    except Exception as e:
+        return ("UNKNOWN", 0, 0, 0, f"IHSG error: {str(e)[:40]}", 0.0)
 
 def get_regime_config(regime):
     return {
@@ -877,7 +925,7 @@ def get_aksi_v2(sinyal, gc_now, score):
 #  10 threads × 1.5s/req = ~6.7 req/detik → aman!
 #  778 tickers ÷ 10 threads = ~2 menit (vs 20 menit sequential)
 # ════════════════════════════════════════════════════
-def fetch_intraday(tickers, interval="15m", force_fresh=False):
+def fetch_intraday(tickers, interval="15m"):
     all_dfs = {}
     ticker_list = list(tickers)
 
@@ -885,12 +933,12 @@ def fetch_intraday(tickers, interval="15m", force_fresh=False):
     need_fetch = []
     for t in ticker_list:
         raw_t = t.replace(".JK","").upper()
-        if not force_fresh:
-            cached = _cache_get(raw_t, interval)
-            if cached is not None:
-                all_dfs[t] = cached
-                continue
+        cached = _cache_get(raw_t, interval)
+        if cached is not None:
+            all_dfs[t] = cached
+            continue
         need_fetch.append(t)
+
 
     if not need_fetch:
         return all_dfs
@@ -1151,19 +1199,18 @@ with tab_scanner:
             st.markdown('<div class="settings-label">TAMPILAN</div>', unsafe_allow_html=True)
             view_mode  = st.radio("View", ["Card View 🃏","Table View 📊"], label_visibility="collapsed", key="view_mode")
             quick_mode = st.toggle("⚡ Quick (200 saham)", value=False, key="quick_mode")
-            force_fresh= st.toggle("🔄 Fresh Data", value=False, key="force_fresh",
-                                   help="Skip cache, paksa fetch ulang dari API")
             st.caption(f"🎯 Regime: {regime} · Mode: {scan_mode}")
 
     # Scan button — INLINE, no st.rerun defer
     do_scan_btn = st.button("🔥 MULAI SCAN SEKARANG", type="primary", use_container_width=True, key="btn_scan")
 
-    # Auto-refresh check (no sleep!)
+    # Auto-refresh — persis yfinance version
+    # Cek di awal sebelum render: kalau elapsed >= 300s → auto scan
     _now_check = now_jkt.timestamp()
     auto_trigger = False
     if st.session_state.last_scan_time and not do_scan_btn:
         _elapsed = _now_check - st.session_state.last_scan_time
-        if _elapsed >= 480 and st.session_state.scan_results and is_open:
+        if _elapsed >= 300 and st.session_state.scan_results:
             auto_trigger = True
 
     if do_scan_btn or auto_trigger:
@@ -1186,12 +1233,12 @@ with tab_scanner:
             need_fetch = []
             for t in ticker_list:
                 raw_t = t.replace(".JK","").upper()
-                if not force_fresh:
-                    cached = _cache_get(raw_t, "15m")
-                    if cached is not None:
-                        data_dict[t] = cached
-                        continue
+                cached = _cache_get(raw_t, "15m")
+                if cached is not None:
+                    data_dict[t] = cached
+                    continue
                 need_fetch.append(t)
+
 
             n_cached = len(data_dict)
             n_need   = len(need_fetch)
@@ -1443,7 +1490,7 @@ with tab_scanner:
         _mnt_cd  = int(_rem_cd//60); _sec_cd=int(_rem_cd%60)
         _last_cd = datetime.fromtimestamp(st.session_state.last_scan_time,jakarta_tz).strftime("%H:%M:%S")
         _el      = int(_now_cd-st.session_state.last_scan_time)
-        st.caption(f"⏱️ Scan {_el//60}m {_el%60}s lalu · Refresh dalam: {_mnt_cd:02d}:{_sec_cd:02d} · Last: {_last_cd} WIB · {'🔄 Fresh' if force_fresh else '💾 Cache'}")
+        st.caption(f"⏱️ Scan {_el//60}m {_el%60}s lalu · Refresh dalam: {_mnt_cd:02d}:{_sec_cd:02d} · Last: {_last_cd} WIB")
 
     results = st.session_state.scan_results
     if not results and not do_scan_btn and not auto_trigger:
@@ -1777,7 +1824,7 @@ with tab_bsjp:
         bsjp_min_rvol =st.slider("Min RVOL",1.0,5.0,1.5,0.1,key="bsjp_rvol")
     with bc2:
         bsjp_min_turn=st.number_input("Min Turnover (M Rp)",value=500,step=100,key="bsjp_turn")*1_000_000
-        bsjp_fresh=st.toggle("🔄 Fresh Data",value=False,key="bsjp_fresh")
+    # Fresh data via cache TTL otomatis (no toggle needed)
 
     do_bsjp=st.button("🌙 SCAN BSJP SEKARANG",type="primary",use_container_width=True,key="btn_bsjp")
 
@@ -1786,7 +1833,7 @@ with tab_bsjp:
         if not scan_data:
             _pb2=st.progress(0)
             st.info("Fetching data untuk BSJP...")
-            scan_data=fetch_intraday(tuple(stocks_yf[:200]), force_fresh=bsjp_fresh)
+            scan_data=fetch_intraday(tuple(stocks_yf[:200]))
             _pb2.empty()
         pb_bsjp=st.progress(0); tickers_bsjp=list(scan_data.keys())
         for i,ticker_yf in enumerate(tickers_bsjp):
@@ -2060,46 +2107,34 @@ with tab_backtest:
                   </div></div>""", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════
-#  FOOTER + AUTO-REFRESH — JavaScript Timer
-#  st.rerun() tidak jalan saat page idle (tidak ada interaksi).
-#  JS timer jalan di browser → reload otomatis tiap 5 menit.
+#  FOOTER + AUTO-REFRESH
+#  Sama persis yfinance version:
+#  - auto_trigger di atas handle rescan tiap 300s
+#  - st.rerun() dipanggil di sini kalau waktunya
 # ════════════════════════════════════════════════════
-import streamlit.components.v1 as _components
-
 _now_f      = now_jkt.timestamp()
-is_open_now = 9 <= now_jkt.hour < 16
 
 if st.session_state.last_scan_time:
-    _rem2    = max(0, 480 - (_now_f - st.session_state.last_scan_time))
-    mnt2     = int(_rem2 // 60); sec2 = int(_rem2 % 60)
-    last_t2  = datetime.fromtimestamp(st.session_state.last_scan_time, jakarta_tz).strftime("%H:%M:%S")
-    elapsed_s= int(_now_f - st.session_state.last_scan_time)
-    time_info= f"⏱️ Next: <span style='color:#ff7b00'>{mnt2:02d}:{sec2:02d}</span> · Last: <span style='color:#2dd4bf'>{last_t2} WIB</span> · ⚡ DataSectors"
+    _rem2   = max(0, 300 - (_now_f - st.session_state.last_scan_time))
+    mnt2    = int(_rem2 // 60); sec2 = int(_rem2 % 60)
+    last_t2 = datetime.fromtimestamp(st.session_state.last_scan_time, jakarta_tz).strftime("%H:%M:%S")
+    time_info = f"⏱️ Next auto-scan: <span style='color:#ff7b00'>{mnt2:02d}:{sec2:02d}</span> · Last: <span style='color:#2dd4bf'>{last_t2} WIB</span>"
 else:
-    _rem2 = 300; elapsed_s = 0
-    time_info = "⏱️ Klik Scan untuk mulai · ⚡ DataSectors"
+    _rem2 = 300
+    time_info = "⏱️ Klik Scan untuk mulai"
 
 st.markdown(f"""
 <div style="margin-top:28px;padding-top:14px;border-top:1px solid #1c2533;
      display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">
-    🔥 Theta Turbo v5.2 · DataSectors ⚡ · Auto-refresh 5m
+    🔥 Theta Turbo v5.2 · DataSectors ⚡ + yFinance · Auto Regime · IDX 900+
   </div>
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">{time_info}</div>
 </div>""", unsafe_allow_html=True)
 
-# JS timer → reload browser otomatis, tidak butuh interaksi user
-# st.rerun() DIHAPUS → bikin infinite loop di Streamlit Cloud!
-# KUNCI: hanya inject timer kalau BELUM waktunya reload (elapsed < 480)
-# Kalau elapsed >= 480 → auto_trigger sudah handle rescan, jangan loop!
-if is_open_now and st.session_state.scan_results and st.session_state.last_scan_time:
-    if elapsed_s < 480:  # hanya kalau belum waktunya
-        _rem_ms = max(10000, int(_rem2 * 1000))  # min 10 detik
-        _components.html(
-            f"""<script>
-            if(window._tt_timer) clearTimeout(window._tt_timer);
-            window._tt_timer = setTimeout(function(){{
-                window.parent.location.reload();
-            }}, {_rem_ms});
-            </script>""",
-            height=0)
+# Auto-rerun — persis yfinance version (simple, no JS conflict)
+if st.session_state.last_scan_time:
+    _elapsed_f = _now_f - st.session_state.last_scan_time
+    if _elapsed_f >= 295:
+        time.sleep(5)
+        st.rerun()
