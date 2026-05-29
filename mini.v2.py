@@ -10,6 +10,11 @@ import threading
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+try:
+    from streamlit_autorefresh import st_autorefresh
+    _HAS_AR = True
+except ImportError:
+    _HAS_AR = False
 
 # ════════════════════════════════════════════════════
 #  CONFIG
@@ -24,6 +29,22 @@ except:
     DS_KEY = ""
 
 DS_BASE = "https://api.datasectors.com"
+
+# ── Yahoo Finance anti-bot session — WAJIB untuk avoid rate limit ──
+# Custom User-Agent + session shared across all yf.download calls
+import requests as _req_sess
+_YF_SESSION = _req_sess.Session()
+_YF_SESSION.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+})
 
 # ════════════════════════════════════════════════════
 #  DISK CACHE — thread-safe, persistent antar session
@@ -189,7 +210,13 @@ for _k, _v in [("tt_last_sent", set()), ("wl_results", []),
                 ("data_dict", {}), ("last_scan_time", None),
                 ("last_scan_mode", "Scalping ⚡"),
                 ("bsjp_results", []), ("gapup_results", []),
-                ("sector_data", {}), ("beta_data", [])]:
+                ("sector_data", {}), ("beta_data", []),
+                # ss_* = sumber kebenaran saat auto_trigger
+                ("ss_scan_mode",   "Scalping ⚡"),
+                ("ss_min_score",   4),
+                ("ss_vol_thresh",  1.5),
+                ("ss_min_turn",    500_000_000),
+                ("ss_auto_thresh", True),]:
     if _k not in st.session_state: st.session_state[_k] = _v
 
 # Auto-restore dari disk setelah browser refresh
@@ -200,6 +227,9 @@ if not st.session_state.scan_results:
         st.session_state.last_scan_time = _tt_saved["ts"]
 
 st.set_page_config(layout="wide", page_title="Theta Turbo v5", page_icon="🔥", initial_sidebar_state="collapsed")
+# Auto-refresh: cek tiap 60s, scan trigger kalau elapsed >= 300s
+if _HAS_AR:
+    _ar_count = st_autorefresh(interval=60_000, limit=None, key="tt_autorefresh")
 
 st.markdown("""
 <style>
@@ -229,7 +259,6 @@ html,body,[data-testid="stAppViewContainer"]{background:var(--bg)!important;colo
 .metric-card.red::before{background:var(--red);}
 .metric-card.amber::before{background:var(--amber);}
 .metric-card.orange::before{background:var(--orange);}
-.metric-card.purple::before{background:var(--purple);}
 .metric-label{font-size:10px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:4px;}
 .metric-value{font-family:'Space Mono',monospace;font-size:24px;font-weight:700;color:var(--heading);line-height:1;}
 .metric-sub{font-size:10px;color:var(--muted);margin-top:3px;}
@@ -242,12 +271,6 @@ html,body,[data-testid="stAppViewContainer"]{background:var(--bg)!important;colo
 .signal-card.gacor::after{background:var(--green);}
 .signal-card.potensial::after{background:var(--amber);}
 .signal-card.watch::after{background:var(--accent);}
-.signal-card.bagger{border-color:rgba(191,95,255,.6);background:rgba(191,95,255,.05);box-shadow:0 0 20px rgba(191,95,255,.15);}
-.signal-card.bagger::after{background:var(--purple);}
-.sc-bar.filled-purple{background:var(--purple);}
-.bagger-alert-box{background:rgba(191,95,255,.06);border:1px solid rgba(191,95,255,.5);border-radius:8px;padding:14px 18px;margin-bottom:16px;animation:pulse-purple 2s infinite;}
-@keyframes pulse-purple{0%,100%{border-color:rgba(191,95,255,.4);}50%{border-color:rgba(191,95,255,.9);}}
-.bagger-title{color:var(--purple);font-family:'Space Mono',monospace;font-size:12px;font-weight:700;letter-spacing:2px;}
 .sc-ticker{font-family:'Space Mono',monospace;font-size:18px;font-weight:700;color:var(--heading);}
 .sc-price{font-family:'Space Mono',monospace;font-size:13px;color:var(--muted);}
 .sc-signal{font-size:13px;font-weight:700;margin:6px 0;}
@@ -265,7 +288,7 @@ html,body,[data-testid="stAppViewContainer"]{background:var(--bg)!important;colo
 .tape-inner{display:inline-block;animation:marquee 35s linear infinite;}
 @keyframes marquee{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
 .tape-item{display:inline-block;margin:0 18px;font-family:'Space Mono',monospace;font-size:10px;}
-.tape-item.up{color:var(--green);}.tape-item.down{color:var(--red);}.tape-item.flat{color:var(--muted);}.tape-item.bagger{color:var(--purple);}
+.tape-item.up{color:var(--green);}.tape-item.down{color:var(--red);}.tape-item.flat{color:var(--muted);}
 ::-webkit-scrollbar{width:4px;height:4px;}::-webkit-scrollbar-track{background:var(--bg);}::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
 [data-testid="stNumberInput"] input{background:var(--surface)!important;border:1px solid var(--border)!important;color:var(--heading)!important;font-family:'Space Mono',monospace!important;border-radius:6px!important;}
 button[data-testid="baseButton-primary"]{background:var(--orange)!important;color:var(--bg)!important;font-family:'Space Mono',monospace!important;font-weight:700!important;border:none!important;}
@@ -388,70 +411,91 @@ stock_map  = {s + ".JK": s for s in raw_stocks}
 # ════════════════════════════════════════════════════
 #  MARKET REGIME
 # ════════════════════════════════════════════════════
-@st.cache_data(ttl=300)   # 5 menit — lebih responsif
+@st.cache_data(ttl=600)
+@st.cache_data(ttl=120)   # 2 menit — real-time intraday
 def get_market_regime():
+    """
+    FIXED: Pakai harga REAL-TIME IHSG (intraday), bukan harga kemarin close.
+    Root cause lama: interval="1d" → close[-1] = harga KEMARIN
+    → market naik 1% intraday tapi regime masih RED karena baca data lama.
+
+    Fix:
+    - EMA20/EMA55 dari daily historis (butuh 55 hari data)
+    - Harga CURRENT dari 1m/5m intraday → real-time
+    - chg% = harga sekarang vs kemarin close
+    """
     try:
-        df = yf.download("^JKSE", period="60d", interval="1d",
-                         progress=False, auto_adjust=True, timeout=10)
-        if df is None or len(df) < 10:
+        # ── Step 1: EMA dari daily historis ──
+        df_daily = yf.download("^JKSE", period="90d", interval="1d",
+                               progress=False, auto_adjust=True,
+                               session=_YF_SESSION)
+        if df_daily is None or len(df_daily) < 20:
             return ("UNKNOWN", 0, 0, 0, "Data IHSG kurang", 0.0)
+        if isinstance(df_daily.columns, pd.MultiIndex):
+            df_daily.columns = df_daily.columns.droplevel(-1)
+        close_hist = df_daily["Close"]
+        if isinstance(close_hist, pd.DataFrame):
+            close_hist = close_hist.iloc[:, 0]
+        close_hist = close_hist.dropna()
+        if len(close_hist) < 20:
+            return ("UNKNOWN", 0, 0, 0, "Data historis kurang", 0.0)
 
-        # FIX: handle MultiIndex columns dari yfinance terbaru
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
+        ema20      = float(close_hist.ewm(span=20, adjust=False).mean().iloc[-1])
+        ema55      = float(close_hist.ewm(span=min(55, len(close_hist)-1), adjust=False).mean().iloc[-1])
+        prev_close = float(close_hist.iloc[-1])   # kemarin close
 
-        # FIX: squeeze() bisa return DataFrame kalau ada MultiIndex sisa
-        close = df["Close"]
-        if isinstance(close, pd.DataFrame):
-            close = close.iloc[:, 0]
-        close = close.dropna()
+        # ── Step 2: Harga REAL-TIME via intraday ──
+        # 1m dulu, fallback 5m, fallback 15m
+        price = None; chg = 0.0
+        for tf, per in [("1m","1d"), ("5m","1d"), ("15m","2d")]:
+            try:
+                df_rt = yf.download("^JKSE", period=per, interval=tf,
+                                    progress=False, auto_adjust=True,
+                                    session=_YF_SESSION)
+                if df_rt is not None and not df_rt.empty and len(df_rt) >= 1:
+                    if isinstance(df_rt.columns, pd.MultiIndex):
+                        df_rt.columns = df_rt.columns.droplevel(-1)
+                    rt_c = df_rt["Close"]
+                    if isinstance(rt_c, pd.DataFrame): rt_c = rt_c.iloc[:, 0]
+                    rt_c = rt_c.dropna()
+                    if len(rt_c) >= 1:
+                        price = float(rt_c.iloc[-1])
+                        chg   = (price - prev_close) / max(prev_close, 1) * 100
+                        break
+            except: continue
 
-        if len(close) < 10:
-            return ("UNKNOWN", 0, 0, 0, "Data close kurang", 0.0)
+        # Fallback ke daily
+        if price is None:
+            price = prev_close
+            chg   = float(((close_hist.iloc[-1] - close_hist.iloc[-2]) / close_hist.iloc[-2]) * 100)
 
-        ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
-        ema55 = float(close.ewm(span=min(55, len(close)-1), adjust=False).mean().iloc[-1])
-        price = float(close.iloc[-1])
-        chg   = float(((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) * 100)
-
-        # ─── REGIME LOGIC YANG LEBIH PRESISI ───
-        # Band ±1.2%: price dalam range EMA20±1.2% → jangan langsung RED
-        band      = 0.012
-        pct_vs_e20 = (price - ema20) / ema20 * 100  # % posisi vs EMA20
-        pct_vs_e55 = (price - ema55) / ema55 * 100
-
-        above_e20_clear = price > ema20 * (1 + band)   # jelas di atas EMA20
-        above_e20_any   = price > ema20 * (1 - band)   # di atas EMA20 ± band
+        # ── Step 3: Regime logic ──
+        band            = 0.015   # ±1.5%
+        pct_vs_e20      = (price - ema20) / ema20 * 100
+        above_e20_clear = price > ema20 * (1 + band)
+        above_e20_any   = price > ema20 * (1 - band)
         above_e55       = price > ema55
-
-        # Momentum: hari ini naik > 0.3% = tidak bisa RED
-        recovering      = chg > 0.3
-        # Bearish: turun > 0.3% AND jelas di bawah EMA20
-        bearish_confirm = chg < -0.3 and not above_e20_any
+        recovering      = chg > 0.5
+        bearish_confirm = chg < -0.5 and not above_e20_any
 
         if above_e20_clear and above_e55:
             regime = "GREEN"
-            detail = f"IHSG {price:,.0f} di atas EMA20 & EMA55 → Bullish ✅ ({pct_vs_e20:+.1f}% vs EMA20)"
+            detail = f"IHSG {price:,.0f} > EMA20 & EMA55 ✅ ({pct_vs_e20:+.1f}%, hari ini {chg:+.2f}%)"
         elif above_e20_any and above_e55:
-            # Di dekat EMA20 tapi sudah di atas EMA55 → masih GREEN
             regime = "GREEN"
-            detail = f"IHSG {price:,.0f} dekat EMA20({ema20:,.0f}) & di atas EMA55 → Bullish"
+            detail = f"IHSG {price:,.0f} dekat EMA20({ema20:,.0f}) & > EMA55 → Bullish ({chg:+.2f}%)"
         elif above_e20_any and not above_e55:
-            # Di atas EMA20 tapi di bawah EMA55 → SIDEWAYS
             regime = "SIDEWAYS"
-            detail = f"IHSG {price:,.0f} > EMA20 tapi < EMA55({ema55:,.0f}) → Sideways"
+            detail = f"IHSG {price:,.0f} > EMA20 tapi < EMA55({ema55:,.0f}) ({chg:+.2f}%)"
         elif not above_e20_any and recovering:
-            # Di bawah EMA20 TAPI hari ini naik = sedang recovery → SIDEWAYS bukan RED
             regime = "SIDEWAYS"
             detail = f"IHSG {price:,.0f} recovery {chg:+.2f}% (EMA20={ema20:,.0f}, gap {pct_vs_e20:+.1f}%)"
         elif bearish_confirm:
-            # Jelas bearish: di bawah EMA20 + hari ini turun juga
             regime = "RED"
-            detail = f"IHSG {price:,.0f} < EMA20({ema20:,.0f}) {pct_vs_e20:+.1f}% + turun {chg:.2f}% → Bearish"
+            detail = f"IHSG {price:,.0f} < EMA20 {pct_vs_e20:+.1f}% + turun {chg:.2f}% → Bearish"
         else:
-            # Di bawah EMA20 tapi flat → SIDEWAYS
             regime = "SIDEWAYS"
-            detail = f"IHSG {price:,.0f} sedikit di bawah EMA20({ema20:,.0f}) {pct_vs_e20:+.1f}% → Sideways"
+            detail = f"IHSG {price:,.0f} konsolidasi (EMA20={ema20:,.0f}, {pct_vs_e20:+.1f}%)"
 
         return (regime, price, ema20, ema55, detail, chg)
     except Exception as e:
@@ -462,9 +506,9 @@ def get_regime_config(regime):
         "RED":      {"mode":"Reversal 🎯","min_score":5,"min_rvol":2.0,"sl_mult":0.6,
                      "label":"🔴 MARKET MERAH — Reversal Only, Score ≥ 5","color":"#ff3d5a",
                      "desc":"Market bearish. Fokus reversal oversold, filter ketat."},
-        "GREEN":    {"mode":"Bagger 💎","min_score":4,"min_rvol":2.0,"sl_mult":0.8,
-                     "label":"🟢 MARKET HIJAU — Wyckoff Bagger Hunt, Score ≥ 4","color":"#00ff88",
-                     "desc":"Market bullish. Cari akumulasi Wyckoff + breakout bagger. RVOL ≥ 2x."},
+        "GREEN":    {"mode":"Scalping ⚡","min_score":4,"min_rvol":1.5,"sl_mult":0.8,
+                     "label":"🟢 MARKET HIJAU — Scalping & Momentum, Score ≥ 4","color":"#00ff88",
+                     "desc":"Market bullish. Scalping & Momentum optimal."},
         "SIDEWAYS": {"mode":"Scalping ⚡","min_score":4,"min_rvol":2.0,"sl_mult":0.7,
                      "label":"🟡 MARKET SIDEWAYS — Semua Mode, RVOL ≥ 2x","color":"#ffb700",
                      "desc":"Market sideways. RVOL harus lebih kuat."},
@@ -625,201 +669,18 @@ def score_reversal(r, p, p2):
     if float(r['BodyRatio'])>0.75 and float(r['Close'])<float(r['Open']): score-=0.8; reasons.append("⚠️ Bearish bar kuat")
     return max(0,min(6,round(score,1))), reasons, {}
 
-
-def score_bagger(r, p, p2, df_full):
-    """
-    Wyckoff Accumulation Bagger Detector — versi DataSectors (dengan FBuy/FSell)
-    3 Layer:
-    ① Phase A-B  : Sideways + Dry Volume + Stealth Net Buy (FBuy dominant)
-    ② Spring     : New Low → V-Shape Recovery (Shakeout)
-    ③ Phase D    : RVOL Surge + Breakout + Thick Body
-    """
-    def _sf(v, d=0.):
-        try: x=float(v); return d if (np.isnan(x) or np.isinf(x)) else x
-        except: return d
-
-    score=0; reasons=[]
-    close  = _sf(r.get('Close', r['Close'] if hasattr(r,'__getitem__') else 0))
-    try: close = float(r['Close'])
-    except: pass
-    e9   = _sf(r.get('EMA9', 0));  e21 = _sf(r.get('EMA21', 0))
-    e50  = _sf(r.get('EMA50', 0)); e200= _sf(r.get('EMA200', 0))
-    rvol = _sf(r.get('RVOL', 1))
-    rsi_e= _sf(r.get('RSI_EMA', 50))
-    wyckoff_phase = "SCANNING"
-
-    # ① PHASE A-B — SIDEWAYS + DRY VOLUME
-    is_sideways = False
-    range_high  = close * 1.05; range_low = close * 0.95
-    sideways_bars = min(20, len(df_full) - 2)
-    try:
-        r_highs   = df_full['High'].iloc[-sideways_bars-1:-1]
-        r_lows    = df_full['Low'].iloc[-sideways_bars-1:-1]
-        range_high= float(r_highs.max())
-        range_low = float(r_lows.min())
-        range_pct = (range_high - range_low) / max(range_low, 0.01) * 100
-        is_sideways = range_pct < 8.0
-        if is_sideways:
-            tightness_bonus = max(0, (8.0 - range_pct) / 8.0)
-            score += 1.0 + tightness_bonus * 0.5
-            reasons.append(f"Sideways {range_pct:.1f}% ({sideways_bars}B) ✦")
-            wyckoff_phase = "A-B"
-    except: pass
-
-    # Dry Volume
-    try:
-        vol_ma20  = float(df_full['AvgVol'].iloc[-1])
-        vol_last5 = float(df_full['Volume'].iloc[-6:-1].mean())
-        dry_ratio = vol_last5 / max(vol_ma20, 1)
-        if dry_ratio < 0.5 and is_sideways:
-            score += 2.0; reasons.append(f"Dry vol {dry_ratio:.2f}x MA20 — stealth accum ✦✦")
-            wyckoff_phase = "A-B AKUMULASI"
-        elif dry_ratio < 0.7 and is_sideways:
-            score += 1.2; reasons.append(f"Vol drying {dry_ratio:.2f}x MA20 ✦")
-            wyckoff_phase = "A-B AKUMULASI"
-        elif dry_ratio < 0.85 and is_sideways:
-            score += 0.6; reasons.append(f"Vol below avg {dry_ratio:.2f}x")
-    except: pass
-
-    # Stealth Net Buy — pakai FBuy/FSell kalau ada (DataSectors exclusive!)
-    try:
-        if 'FBuy' in df_full.columns and 'FSell' in df_full.columns:
-            fbuy_5 = float(df_full['FBuy'].iloc[-6:-1].sum())
-            fsell_5= float(df_full['FSell'].iloc[-6:-1].sum())
-            ftot_5 = fbuy_5 + fsell_5
-            if ftot_5 > 0:
-                fratio_5 = fbuy_5 / ftot_5
-                if fratio_5 > 0.65 and is_sideways:
-                    score += 2.0; reasons.append(f"🔵 Asing stealth accum {fratio_5:.0%} buy ✦✦")
-                    wyckoff_phase = "A-B AKUMULASI"
-                elif fratio_5 > 0.55:
-                    score += 1.0; reasons.append(f"Asing net buy {fratio_5:.0%} ✦")
-        else:
-            # Fallback: pakai NetVol
-            if len(df_full) >= 12:
-                netvols_10   = [float(df_full['NetVol'].iloc[i]) for i in range(-11, -1)]
-                net_positive = sum(1 for v in netvols_10 if v > 0)
-                net_ratio    = net_positive / 10
-                if net_ratio >= 0.7 and is_sideways:
-                    score += 1.5; reasons.append(f"Stealth net buy {net_positive}/10 bars ✦✦")
-                elif net_ratio >= 0.6:
-                    score += 0.8; reasons.append(f"Net buy {net_positive}/10 bars")
-                elif net_ratio >= 0.5:
-                    score += 0.4
-    except:
-        nv3 = _sf(r.get('NetVol3', 0)); nv8 = _sf(r.get('NetVol8', 0))
-        if nv3>0 and nv8>0: score+=0.8; reasons.append("Net buyer sustained ✦")
-        elif nv3>0:          score+=0.3
-
-    # BB Squeeze
-    try:
-        bb_curr  = float(r['BB_std'])
-        bb_avg10 = float(df_full['BB_std'].iloc[-11:-1].mean())
-        sq_ratio = bb_curr / max(bb_avg10, 0.0001)
-        if sq_ratio < 0.7 and is_sideways:
-            score += 1.5; reasons.append(f"BB squeeze extreme {sq_ratio:.2f}x ✦✦")
-        elif sq_ratio < 0.85:
-            score += 0.8; reasons.append(f"BB squeeze {sq_ratio:.2f}x")
-    except: pass
-
-    # ② SPRING / SHAKEOUT
-    spring_detected = False
-    try:
-        lookback_sp = min(15, len(df_full) - 3)
-        prior_lows  = df_full['Low'].iloc[-lookback_sp-2:-2]
-        support     = float(prior_lows.min())
-        bar_low     = float(r['Low']); bar_close = float(r['Close']); bar_high = float(r['High'])
-        is_spring   = bar_low < support and bar_close > support
-        if is_spring:
-            recovery_strength = (bar_close - bar_low) / max(bar_high - bar_low, 0.0001)
-            spring_vol_ok     = rvol > 1.2
-            if recovery_strength > 0.7 and spring_vol_ok:
-                score += 3.0; reasons.append(f"🔥 SPRING! Support break → rebound {recovery_strength:.0%} ✦✦✦")
-                wyckoff_phase = "SPRING ⚡"; spring_detected = True
-            elif recovery_strength > 0.5:
-                score += 1.8; reasons.append(f"Spring pattern (recovery {recovery_strength:.0%}) ✦✦")
-                wyckoff_phase = "SPRING"; spring_detected = True
-        is_post_spring = (float(p['Low']) < support and
-                          float(p['Close']) > support and bar_close > float(p['Close']))
-        if is_post_spring and not spring_detected:
-            score += 2.0; reasons.append("Post-spring confirmation 🚀 ✦✦")
-            wyckoff_phase = "POST-SPRING"; spring_detected = True
-    except: pass
-
-    # ③ PHASE D — RVOL SURGE + BREAKOUT
-    try:
-        above_resistance = close > range_high * 0.998
-        thick_body       = _sf(r.get('BodyRatio', 0)) > 0.55
-        bull_bar_flag    = float(r['Close']) > float(r['Open'])
-        if rvol > 4.0 and above_resistance and thick_body and bull_bar_flag:
-            score += 3.0; reasons.append(f"🚀 PHASE D! RVOL={rvol:.1f}x breakout thick body ✦✦✦")
-            wyckoff_phase = "PHASE D 🚀"
-        elif rvol > 3.0 and above_resistance and bull_bar_flag:
-            score += 2.2; reasons.append(f"Breakout confirmed RVOL={rvol:.1f}x ✦✦")
-            wyckoff_phase = "BREAKOUT ✦"
-        elif rvol > 2.0 and above_resistance:
-            score += 1.5; reasons.append(f"Breakout attempt RVOL={rvol:.1f}x")
-        elif above_resistance:
-            score += 0.8; reasons.append("Above resistance (low vol)")
-        else:
-            if rvol>4.0:   score+=1.5; reasons.append(f"RVOL={rvol:.1f}x MASSIVE 🔥🔥")
-            elif rvol>3.0: score+=1.0; reasons.append(f"RVOL={rvol:.1f}x SURGE 🔥")
-            elif rvol>2.0: score+=0.5; reasons.append(f"RVOL={rvol:.1f}x")
-            elif rvol<1.3 and wyckoff_phase not in ["A-B AKUMULASI","SPRING","POST-SPRING"]:
-                score -= 0.5
-    except:
-        if rvol>4.0:   score+=1.5; reasons.append(f"RVOL={rvol:.1f}x MASSIVE 🔥🔥")
-        elif rvol>3.0: score+=1.0; reasons.append(f"RVOL={rvol:.1f}x SURGE 🔥")
-        elif rvol>2.0: score+=0.5; reasons.append(f"RVOL={rvol:.1f}x")
-
-    # EMA Structure
-    if e9>e21>e50>e200:     score+=1.5; reasons.append("EMA golden stack ✦✦")
-    elif e9>e21>e50:         score+=1.0; reasons.append("EMA stack ▲")
-    elif e9>e21:             score+=0.4
-    elif is_sideways and wyckoff_phase in ["A-B AKUMULASI","SPRING","POST-SPRING"]:
-        score+=0.2; reasons.append("EMA flat (accum phase OK)")
-
-    # RSI konteks beda per fase
-    if wyckoff_phase in ["A-B","A-B AKUMULASI","SPRING","POST-SPRING"]:
-        if 25<=rsi_e<=52:   score+=1.0; reasons.append(f"RSI-EMA={rsi_e:.1f} accum zone ✓")
-        elif rsi_e<25:       score+=0.6; reasons.append(f"RSI-EMA={rsi_e:.1f} extreme OS (load zone)")
-        elif rsi_e>65:       score-=0.3
-    else:
-        if 52<rsi_e<72:     score+=1.0; reasons.append(f"RSI-EMA={rsi_e:.1f} momentum zone")
-        elif rsi_e>=72:     score-=0.5; reasons.append(f"⚠️ RSI OB {rsi_e:.1f}")
-        elif rsi_e<40:      score-=0.3
-
-    # VWAP & EMA200 floor
-    if close > _sf(r.get('VWAP', close)): score+=0.5; reasons.append("Above VWAP")
-    if e200 > 0 and close < e200*0.88:    score-=1.0
-
-    # Consecutive bull bars
-    try:
-        if len(df_full)>=4:
-            bc=sum(1 for i in range(-3,0) if float(df_full['Close'].iloc[i])>float(df_full['Open'].iloc[i]))
-            if bc==3:   score+=0.8; reasons.append("3x consecutive bull bars")
-            elif bc==2: score+=0.3
-    except: pass
-
-    if wyckoff_phase != "SCANNING":
-        reasons.insert(0, f"⚙️ Wyckoff: {wyckoff_phase}")
-
-    return max(0, min(6, round(score, 1))), reasons, {"wyckoff_phase": wyckoff_phase}
-
 def get_signal(score, mode):
-    t = {"Scalping ⚡":{5:"GACOR ⚡",    4:"POTENSIAL 🔥",3:"WATCH 👀"},
-         "Momentum 🚀":{5:"GACOR 🚀",    4:"POTENSIAL 🔥",3:"WATCH 👀"},
-         "Reversal 🎯":{5:"REVERSAL 🎯", 4:"POTENSIAL 🔥",3:"WATCH 👀"},
-         "Bagger 💎":  {5:"BAGGER 💎",   4:"KANDIDAT 🚀", 3:"WATCH 👀"}}.get(mode,{})
+    t = {"Scalping ⚡":{5:"GACOR ⚡",4:"POTENSIAL 🔥",3:"WATCH 👀"},
+         "Momentum 🚀":{5:"GACOR 🚀",4:"POTENSIAL 🔥",3:"WATCH 👀"},
+         "Reversal 🎯":{5:"REVERSAL 🎯",4:"POTENSIAL 🔥",3:"WATCH 👀"}}.get(mode,{})
     for thresh in sorted(t.keys(), reverse=True):
         if score >= thresh: return t[thresh]
     return "WAIT"
 
 def get_card_class(signal):
-    if "BAGGER" in signal or "KANDIDAT" in signal: return "bagger"
-    if "GACOR" in signal or "REVERSAL" in signal:  return "gacor"
-    if "POTENSIAL" in signal:                      return "potensial"
-    if "WATCH" in signal:                          return "watch"
+    if "GACOR" in signal or "REVERSAL" in signal: return "gacor"
+    if "POTENSIAL" in signal: return "potensial"
+    if "WATCH" in signal: return "watch"
     return ""
 
 def get_sinyal_v2(r, p, p2):
@@ -925,7 +786,7 @@ def get_aksi_v2(sinyal, gc_now, score):
 #  10 threads × 1.5s/req = ~6.7 req/detik → aman!
 #  778 tickers ÷ 10 threads = ~2 menit (vs 20 menit sequential)
 # ════════════════════════════════════════════════════
-def fetch_intraday(tickers, interval="15m"):
+def fetch_intraday(tickers, interval="15m", force_fresh=False):
     all_dfs = {}
     ticker_list = list(tickers)
 
@@ -933,12 +794,12 @@ def fetch_intraday(tickers, interval="15m"):
     need_fetch = []
     for t in ticker_list:
         raw_t = t.replace(".JK","").upper()
-        cached = _cache_get(raw_t, interval)
-        if cached is not None:
-            all_dfs[t] = cached
-            continue
+        if not force_fresh:
+            cached = _cache_get(raw_t, interval)
+            if cached is not None:
+                all_dfs[t] = cached
+                continue
         need_fetch.append(t)
-
 
     if not need_fetch:
         return all_dfs
@@ -964,7 +825,8 @@ def fetch_intraday(tickers, interval="15m"):
 def fetch_pivot_data(ticker_yf):
     try:
         df = yf.download(ticker_yf, period="5d", interval="1d",
-                         progress=False, auto_adjust=True, threads=False)
+                         progress=False, auto_adjust=True,
+                         threads=False, session=_YF_SESSION)
         if df is None or len(df) < 2: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
         prev = df.iloc[-2]
@@ -996,20 +858,77 @@ def send_telegram(results_top, source="Scanner"):
            f"⏰ `{now.strftime('%H:%M:%S')} WIB` · `{now.strftime('%d %b %Y')}`\n{sep}\n")
     body = ""
     for r in results_top[:5]:
-        sig  = r.get('Signal','-')
-        em   = "🏆" if ("GACOR" in sig or "REVERSAL" in sig) else ("🔥" if "POTENSIAL" in sig else "👀")
-        te   = "📈" if "▲" in r.get('Trend','') else ("📉" if "▼" in r.get('Trend','') else "➡️")
-        body += (f"\n{em} *{r['Ticker']}*  `{sig}`\n"
-                 f"   💰 Price: `{r['Price']:,}` {te}\n"
-                 f"   📈 RSI-EMA: `{r.get('RSI-EMA',0)}` | RVOL: `{r.get('RVOL',0)}x`\n"
-                 f"   🎯 TP: `{r['TP']:,}` | 🛑 SL: `{r['SL']:,}`\n"
-                 f"   💡 _{r.get('Reasons','')[:60]}_\n")
+        sig    = r.get('Signal', '-')
+        ticker = r.get('Ticker', r.get('Pair', r.get('Coin', '?')))
+        price  = r.get('Price', 0)
+        tp_v   = r.get('TP', 0); sl_v = r.get('SL', 0)
+        em     = "💎" if ("BAGGER" in sig or "KANDIDAT" in sig) else ("🏆" if ("GACOR" in sig or "REVERSAL" in sig) else ("🔥" if "POTENSIAL" in sig else "👀"))
+        te     = "📈" if "▲" in r.get('Trend','') else ("📉" if "▼" in r.get('Trend','') else "➡️")
+        body  += (f"\n{em} *{ticker}*  `{sig}`\n"
+                  f"   💰 Price: `{price:,}` {te}\n"
+                  f"   📈 RSI: `{r.get('RSI-EMA', r.get('RSI_EMA', 0))}` | RVOL: `{r.get('RVOL',0)}x`\n"
+                  f"   🎯 TP: `{tp_v:,}` | 🛑 SL: `{sl_v:,}`\n"
+                  f"   💡 _{r.get('Reasons','')[:60]}_\n")
     footer = f"\n{sep}\n⚡ _Theta Turbo v5 · 15M_\n⚠️ _BUKAN saran investasi!_"
     try:
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                       data={"chat_id":CHAT_ID,"text":hdr+body+footer,"parse_mode":"Markdown"},
                       timeout=10)
     except: pass
+
+# ════════════════════════════════════════════════════
+#  YFINANCE SAFE EXTRACTOR — handles all yfinance versions
+#  Fixes MultiIndex structure yang berubah di versi 0.2.x+
+# ════════════════════════════════════════════════════
+def _yf_extract(raw, ticker, n_batch):
+    """
+    Robust extraction dari yfinance — handles SEMUA versi:
+    - 0.2.x single: flat columns [Open,High,Low,Close,Volume]
+    - 0.2.x multi:  MultiIndex (Ticker, Price) atau (Price, Ticker)
+    - 1.4.x single: MultiIndex (Price, Ticker) even untuk 1 ticker
+    - 1.4.x multi:  MultiIndex (Price, Ticker)
+    """
+    try:
+        if raw is None or raw.empty: return None
+        _ohlcv = {'Open','High','Low','Close','Volume','Adj Close',
+                  'open','high','low','close','volume','adj close'}
+        if n_batch == 1:
+            df = raw.copy()
+            if isinstance(df.columns, pd.MultiIndex):
+                l0 = df.columns.get_level_values(0).unique().tolist()
+                l1 = df.columns.get_level_values(1).unique().tolist()
+                # (Price, Ticker) format → yfinance 1.4.x
+                if any(x in _ohlcv for x in l0):
+                    df = df.droplevel(1, axis=1)
+                # (Ticker, Price) format
+                elif any(x in _ohlcv for x in l1):
+                    df = df.droplevel(0, axis=1)
+        else:
+            if not isinstance(raw.columns, pd.MultiIndex): return None
+            l0 = raw.columns.get_level_values(0).unique().tolist()
+            l1 = raw.columns.get_level_values(1).unique().tolist()
+            # yfinance 0.2.x: (Ticker, Price)
+            if ticker in l0:
+                df = raw[ticker].copy()
+            # yfinance 1.4.x: (Price, Ticker)
+            elif ticker in l1:
+                df = raw.xs(ticker, axis=1, level=1).copy()
+            else:
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(-1)
+        # Normalize column names (lowercase → capitalize)
+        rename = {c: c.capitalize() for c in df.columns if c.islower()}
+        if rename: df = df.rename(columns=rename)
+        # Handle 'Adj Close' → rename to 'Close' kalau Close tidak ada
+        if 'Adj Close' in df.columns and 'Close' not in df.columns:
+            df = df.rename(columns={'Adj Close': 'Close'})
+        required = ['Open','High','Low','Close','Volume']
+        if any(c not in df.columns for c in required): return None
+        df = df[required].dropna(subset=['Close'])
+        df = df[df['Volume'] > 0]
+        return df if len(df) > 0 else None
+    except: return None
 
 # ════════════════════════════════════════════════════
 #  SEKTOR
@@ -1033,13 +952,13 @@ def fetch_sector_rotation(sector_stocks):
     tickers_yf = [s+".JK" for s in sector_stocks[:10]]
     try:
         raw = yf.download(tickers_yf, period="3d", interval="1d",
-                          group_by="ticker", progress=False, threads=True, auto_adjust=True)
+                          group_by="ticker", progress=False,
+                          threads=False, auto_adjust=True, session=_YF_SESSION)
         for t in tickers_yf:
             tkr = t.replace(".JK","")
             try:
-                df = raw[t].dropna() if len(tickers_yf)>1 else raw.dropna()
-                if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.droplevel(1)
-                if len(df)<2: continue
+                df = _yf_extract(raw, t, len(tickers_yf))
+                if df is None or len(df)<2: continue
                 close=float(df["Close"].iloc[-1]); prev=float(df["Close"].iloc[-2])
                 chg=(close-prev)/prev*100; vol=float(df["Volume"].iloc[-1])
                 avg_v=float(df["Volume"].mean()); rvol=vol/avg_v if avg_v>0 else 1.0
@@ -1087,16 +1006,13 @@ def scan_gap_up(tickers_yf, min_gap_pct=0.5):
         batch = tickers_yf[i:i+30]
         try:
             raw = yf.download(batch, period="5d", interval="1d",
-                              group_by="ticker", progress=False, threads=True, auto_adjust=True)
+                              group_by="ticker", progress=False,
+                              threads=False, auto_adjust=True, session=_YF_SESSION)
             for t in batch:
                 tkr = t.replace(".JK","")
                 try:
-                    if len(batch)>1: df=raw[t].dropna()
-                    else:
-                        df=raw.copy()
-                        if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.droplevel(1)
-                        df=df.dropna()
-                    if len(df)<3: continue
+                    df = _yf_extract(raw, t, len(batch))
+                    if df is None or len(df)<3: continue
                     today=df.iloc[-1]; prev=df.iloc[-2]
                     close=float(today["Close"]); high_t=float(today["High"]); low_t=float(today["Low"])
                     high_p=float(prev["High"]); vol=float(today["Volume"])
@@ -1174,6 +1090,17 @@ tab_scanner, tab_watchlist, tab_bsjp, tab_sector, tab_gapup, tab_trail, tab_back
 #  TAB 1: SCANNER
 # ════════════════════════════════════════════════════
 with tab_scanner:
+    # ── Pre-update scan_mode dari regime SEBELUM expander ──
+    # Fixes: saat auto_trigger fire (page reload), expander collapsed
+    # → widget tidak execute → scan_mode dari session_state
+    _auto_reg_now = st.session_state.get("auto_reg", True)
+    if _auto_reg_now:
+        st.session_state.ss_scan_mode    = rcfg["mode"]
+        st.session_state.ss_auto_thresh  = st.session_state.get("auto_thr", True)
+        if st.session_state.get("auto_thr", True):
+            st.session_state.ss_min_score  = rcfg["min_score"]
+            st.session_state.ss_vol_thresh = rcfg["min_rvol"]
+
     with st.expander("⚙️  Scanner Settings", expanded=False):
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
@@ -1183,9 +1110,12 @@ with tab_scanner:
                 scan_mode = rcfg["mode"]
                 st.markdown(f'<div style="font-family:Space Mono,monospace;font-size:10px;padding:6px 10px;background:rgba(0,0,0,.3);border-radius:4px;color:{rcolor};">Auto: {scan_mode}</div>', unsafe_allow_html=True)
             else:
-                scan_mode = st.radio("Mode", ["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"], label_visibility="collapsed", key="scan_mode_radio")
-            tele_on = st.toggle("📡 Telegram Alert", value=True, key="tele_on")
-        with sc2:
+                _sm_opts = ["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"]
+                _sm_prev = st.session_state.get("ss_scan_mode","Scalping ⚡")
+                _sm_idx  = _sm_opts.index(_sm_prev) if _sm_prev in _sm_opts else 0
+                scan_mode = st.radio("Mode", _sm_opts, index=_sm_idx, label_visibility="collapsed", key="scan_mode_radio")
+            # Persist ke session_state
+            st.session_state.ss_scan_mode = scan_mode
             st.markdown('<div class="settings-label">FILTER</div>', unsafe_allow_html=True)
             auto_thresh = st.toggle("🤖 Auto-Threshold", value=True, key="auto_thr")
             if auto_thresh:
@@ -1194,26 +1124,41 @@ with tab_scanner:
             else:
                 min_score  = st.slider("Min Score (0-6)", 0, 6, 4, key="msc")
                 vol_thresh = st.slider("Min RVOL Spike", 1.0, 5.0, 1.5, 0.1, key="vol")
+            # Persist
+            st.session_state.ss_min_score  = min_score
+            st.session_state.ss_vol_thresh = vol_thresh
             min_turn = st.number_input("Min Turnover (M Rp)", value=500, step=100, key="trn") * 1_000_000
+            st.session_state.ss_min_turn   = min_turn
         with sc3:
             st.markdown('<div class="settings-label">TAMPILAN</div>', unsafe_allow_html=True)
             view_mode  = st.radio("View", ["Card View 🃏","Table View 📊"], label_visibility="collapsed", key="view_mode")
             quick_mode = st.toggle("⚡ Quick (200 saham)", value=False, key="quick_mode")
+            # Fresh data toggle removed — cache TTL handle ini otomatis
             st.caption(f"🎯 Regime: {regime} · Mode: {scan_mode}")
 
     # Scan button — INLINE, no st.rerun defer
     do_scan_btn = st.button("🔥 MULAI SCAN SEKARANG", type="primary", use_container_width=True, key="btn_scan")
 
-    # Auto-refresh — persis yfinance version
-    # Cek di awal sebelum render: kalau elapsed >= 300s → auto scan
+    # Auto-refresh check (no sleep!)
     _now_check = now_jkt.timestamp()
     auto_trigger = False
     if st.session_state.last_scan_time and not do_scan_btn:
         _elapsed = _now_check - st.session_state.last_scan_time
-        if _elapsed >= 300 and st.session_state.scan_results:
+        if _elapsed >= 480 and st.session_state.scan_results and is_open:
             auto_trigger = True
 
     if do_scan_btn or auto_trigger:
+        # Saat auto_trigger: baca dari session_state
+        if auto_trigger:
+            scan_mode  = st.session_state.get("ss_scan_mode",  rcfg["mode"])
+            min_score  = st.session_state.get("ss_min_score",  rcfg["min_score"])
+            vol_thresh = st.session_state.get("ss_vol_thresh", rcfg["min_rvol"])
+            min_turn   = st.session_state.get("ss_min_turn",   500_000_000)
+        # Bagger 💎 → Daily TF; lainnya → 15m intraday
+        _is_bagger_scan = (scan_mode == "Bagger 💎")
+        _scan_tf        = "1d"  if _is_bagger_scan else "15m"
+        _scan_period    = "60d" if _is_bagger_scan else "5d"
+        _min_bars       = 20    if _is_bagger_scan else 55
         scan_list = stocks_yf[:200] if quick_mode else stocks_yf
         n_scan    = len(scan_list)
         prog_ph   = st.empty()
@@ -1233,12 +1178,11 @@ with tab_scanner:
             need_fetch = []
             for t in ticker_list:
                 raw_t = t.replace(".JK","").upper()
-                cached = _cache_get(raw_t, "15m")
+                cached = _cache_get(raw_t, _scan_tf)
                 if cached is not None:
                     data_dict[t] = cached
                     continue
                 need_fetch.append(t)
-
 
             n_cached = len(data_dict)
             n_need   = len(need_fetch)
@@ -1247,81 +1191,88 @@ with tab_scanner:
                 f'⚡ {n_cached} dari cache · {n_need} perlu fetch · 10 threads...</div>',
                 unsafe_allow_html=True)
 
-            # ── DS API parallel — hanya kalau DS_KEY ada ──
+            # Parallel fetch 10 threads (thread-safe karena disk cache)
             def _f(t):
                 raw_t = t.replace(".JK","").upper()
-                if DS_KEY:
-                    df = fetch_ds_ohlcv(raw_t, "15m", 200, True)
+                # Bagger 💎: DS tidak support daily → langsung skip ke yFinance
+                if DS_KEY and not _is_bagger_scan:
+                    df = fetch_ds_ohlcv(raw_t, _scan_tf, 200, True)
                     if df is not None: return t, df
                 return t, None
 
             done_count = [0]
-            src_label = "DataSectors ⚡" if DS_KEY else "—"
-            prog_ph.markdown(
-                f'<div style="color:#ff7b00;font-family:Space Mono,monospace;font-size:11px;">'
-                f'⚡ {n_cached} cache · {n_need} fetch · [{src_label}]...</div>',
-                unsafe_allow_html=True)
+            with ThreadPoolExecutor(max_workers=10) as ex:
+                futs = {ex.submit(_f, t): t for t in need_fetch}
+                for fut in as_completed(futs):
+                    try:
+                        t, df = fut.result(timeout=15)
+                        done_count[0] += 1
+                        if df is not None and len(df) >= 20:
+                            data_dict[t] = df
+                        # Update progress setiap 20 ticker
+                        if done_count[0] % 20 == 0:
+                            pct = 0.1 + (done_count[0] / max(n_need, 1)) * 0.70
+                            pb.progress(min(pct, 0.80))
+                            prog_ph.markdown(
+                                f'<div style="color:#ff7b00;font-family:Space Mono,monospace;font-size:11px;">'
+                                f'⚡ Fetched {done_count[0]}/{n_need} · {len(data_dict)} berhasil...</div>',
+                                unsafe_allow_html=True)
+                    except: done_count[0] += 1
 
-            if need_fetch:
-                with ThreadPoolExecutor(max_workers=10) as ex:
-                    futs = {ex.submit(_f, t): t for t in need_fetch}
-                    for fut in as_completed(futs):
-                        try:
-                            t, df = fut.result(timeout=15)
-                            done_count[0] += 1
-                            if df is not None and len(df) >= 20:
-                                data_dict[t] = df
-                            if done_count[0] % 30 == 0:
-                                pct = 0.10 + (done_count[0] / max(n_need, 1)) * 0.40
-                                pb.progress(min(pct, 0.50))
-                                prog_ph.markdown(
-                                    f'<div style="color:#ff7b00;font-family:Space Mono,monospace;font-size:11px;">' 
-                                    f'⚡ DS fetch {done_count[0]}/{n_need} · {len(data_dict)} berhasil...</div>',
-                                    unsafe_allow_html=True)
-                        except: done_count[0] += 1
-
-            # ══ CRITICAL FIX: yFinance BATCH FALLBACK ══
-            # Selalu jalan untuk SEMUA ticker yang masih missing
-            # Covers: DS_KEY kosong, DS API fail, rate-limit, dll
+            # ══ yFinance BATCH FALLBACK ══
+            # Runs untuk SEMUA ticker yang masih missing (DS quota habis, DS fail, dll)
             missing_yf = [t for t in ticker_list if t not in data_dict]
             if missing_yf:
                 prog_ph.markdown(
                     f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">' 
-                    f'📊 yFinance fallback: {len(missing_yf)} ticker missing → batch download...</div>',
+                    f'📊 yFinance fallback: {len(missing_yf)} ticker · {_scan_tf.upper()} · batch download...</div>',
                     unsafe_allow_html=True)
-                for i_yf in range(0, len(missing_yf), 25):
-                    batch_yf = missing_yf[i_yf:i_yf+25]
-                    try:
-                        raw_yf = yf.download(
-                            batch_yf, period="5d", interval="15m",
-                            group_by='ticker', progress=False,
-                            threads=True, auto_adjust=True)
-                        for t_yf in batch_yf:
-                            try:
-                                if len(batch_yf) > 1:
-                                    df_yf = raw_yf[t_yf].dropna()
-                                else:
-                                    df_yf = raw_yf.copy()
-                                if isinstance(df_yf.columns, pd.MultiIndex):
-                                    df_yf.columns = df_yf.columns.droplevel(1)
-                                if len(df_yf) >= 20:
-                                    data_dict[t_yf] = df_yf
-                            except: pass
-                    except: pass
-                    pct = 0.50 + (i_yf + 25) / max(len(missing_yf), 1) * 0.25
+                BATCH_SZ = 10; DELAY_OK = 3.0; DELAY_429 = 20.0
+                for i_yf in range(0, len(missing_yf), BATCH_SZ):
+                    batch_yf = missing_yf[i_yf:i_yf + BATCH_SZ]
+                    for _attempt in range(3):
+                        try:
+                            raw_yf = yf.download(
+                                list(batch_yf),
+                                period=_scan_period, interval=_scan_tf,
+                                group_by='ticker', progress=False,
+                                threads=False, auto_adjust=True,
+                                session=_YF_SESSION)  # threads=False!
+                            for t_yf in batch_yf:
+                                try:
+                                    df_yf = _yf_extract(raw_yf, t_yf, len(batch_yf))
+                                    if df_yf is not None and len(df_yf) >= _min_bars:
+                                        data_dict[t_yf] = df_yf
+                                except: pass
+                            break
+                        except Exception as _e:
+                            if "rate" in str(_e).lower() or "429" in str(_e):
+                                time.sleep(DELAY_429); continue
+                            break
+                    pct = 0.50 + (i_yf + BATCH_SZ) / max(len(missing_yf), 1) * 0.25
                     pb.progress(min(pct, 0.76))
-                    time.sleep(0.3)
+                    time.sleep(DELAY_OK)
+                prog_ph.markdown(
+                    f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">' 
+                    f'✅ yFinance: {len(data_dict)} saham siap</div>',
+                    unsafe_allow_html=True)
 
             st.session_state.data_dict = data_dict
-            prog_ph.markdown(
-                f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">' 
-                f'✅ Data siap: {len(data_dict)} saham (target: {len(ticker_list)})</div>',
-                unsafe_allow_html=True)
-            pb.progress(0.78)
 
-            # ── Daily context untuk GAIN + VAL ──
+            # ── Daily context: RESAMPLE dari 15m — ZERO extra download! ──
+            # Eliminates entire batch daily download = 0 extra Yahoo requests
             daily_dict = {}
-            # DS daily dulu
+            for _t, _df15 in data_dict.items():
+                try:
+                    _df_d = _df15.resample("1D").agg({
+                        "Open":"first","High":"max","Low":"min",
+                        "Close":"last","Volume":"sum"
+                    }).dropna(subset=["Close"])
+                    _df_d = _df_d[_df_d["Volume"] > 0]
+                    if len(_df_d) >= 2:
+                        daily_dict[_t] = _df_d
+                except: pass
+            # DS daily (FBuy/FSell) — bonus, via cache, no yFinance
             if DS_KEY:
                 def _fd(t):
                     raw_t = t.replace(".JK","").upper()
@@ -1329,37 +1280,18 @@ with tab_scanner:
                     if cached is not None: return t, cached
                     df = fetch_ds_ohlcv(raw_t, "daily", 100, False)
                     return t, df
-                with ThreadPoolExecutor(max_workers=8) as ex:
-                    futs = {ex.submit(_fd, t): t for t in list(data_dict.keys())}
-                    for f in as_completed(futs):
-                        try:
-                            t, df = f.result(timeout=12)
-                            if df is not None and len(df) >= 2:
-                                daily_dict[t] = df
-                        except: pass
-            # yFinance daily fallback untuk yang masih belum ada
-            missing_daily = [t for t in list(data_dict.keys()) if t not in daily_dict]
-            if missing_daily:
-                for i_d in range(0, min(len(missing_daily), 300), 30):
-                    batch_d = missing_daily[i_d:i_d+30]
-                    try:
-                        raw_d = yf.download(
-                            batch_d, period="5d", interval="1d",
-                            group_by='ticker', progress=False,
-                            threads=True, auto_adjust=True)
-                        for t_d in batch_d:
+                try:
+                    with ThreadPoolExecutor(max_workers=5) as ex:
+                        futs = {ex.submit(_fd, t): t for t in list(data_dict.keys())}
+                        for f in as_completed(futs):
                             try:
-                                if len(batch_d) > 1:
-                                    df_d = raw_d[t_d].dropna()
-                                else:
-                                    df_d = raw_d.copy()
-                                if isinstance(df_d.columns, pd.MultiIndex):
-                                    df_d.columns = df_d.columns.droplevel(1)
-                                if len(df_d) >= 2:
-                                    daily_dict[t_d] = df_d
+                                t, df = f.result(timeout=12)
+                                if df is not None and len(df) >= 2:
+                                    daily_dict[t] = df
                             except: pass
-                    except: pass
+                except: pass
             st.session_state.daily_dict = daily_dict
+
             # ── PHASE 2: Process ──
             pb.progress(0.85)
             prog_ph.markdown(
@@ -1375,7 +1307,7 @@ with tab_scanner:
                 pb.progress(0.85 + (i+1)/max(len(tickers),1)*0.14)
                 try:
                     df = data_dict[ticker_yf].copy()
-                    if len(df)<55: continue
+                    if len(df) < _min_bars: continue
                     df = apply_intraday_indicators(df)
                     r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3] if len(df)>=3 else p
                     close=float(r['Close']); vol=float(r['Volume'])
@@ -1402,26 +1334,24 @@ with tab_scanner:
                             gain_pct = float(r.get('ROC3', 0)) * 100
 
                     rvol=float(r['RVOL'])
-                    if turnover < min_turn or rvol < vol_thresh: continue
+                    # Bagger daily: vol harian biasanya lebih besar
+                    # Pakai turnover dari bar terakhir daily
+                    if _is_bagger_scan:
+                        # Daily volume = langsung dari bar
+                        daily_turn = float(r['Close']) * float(r['Volume'])
+                        if daily_turn < min_turn * 0.1 or rvol < 0.3: continue
+                    else:
+                        if turnover < min_turn or rvol < vol_thresh: continue
 
-                    # ── Mode-based scoring (FIXED: scan_mode sekarang dipakai!) ──
-                    if scan_mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p,p2)
-                    elif scan_mode=="Momentum 🚀": sc,reasons,_=score_momentum(r,p,p2)
-                    elif scan_mode=="Bagger 💎":   sc,reasons,_=score_bagger(r,p,p2,df)
-                    else:                          sc,reasons,_=score_reversal(r,p,p2)
-                    if sc < min_score: continue
-                    sig = get_signal(sc, scan_mode)
-                    if sig == "WAIT": continue
-
-                    # ── Bandarmologi signal (DataSectors exclusive) ──
-                    sig_v2,sc_v2,flags_v2,gc_now = get_sinyal_v2(r,p,p2)
-                    aksi_v2 = get_aksi_v2(sig_v2, gc_now, sc_v2)
+                    sig,sc_v2,flags_v2,gc_now = get_sinyal_v2(r,p,p2)
+                    aksi_v2 = get_aksi_v2(sig, gc_now, sc_v2)
+                    reasons = flags_v2.split(" · ") if flags_v2 else []
+                    sc = round(min(6,max(0,sc_v2/10)),1)
+                    if "WAIT" in sig: continue
+                    if sc_v2<10: continue
 
                     atr  = float(r['ATR']) if not np.isnan(float(r['ATR'])) else close*0.01
-                    if scan_mode=="Scalping ⚡":   tp=close+1.5*atr; sl=close-0.8*atr
-                    elif scan_mode=="Momentum 🚀": tp=close+2.0*atr; sl=close-0.8*atr
-                    elif scan_mode=="Bagger 💎":   tp=close+3.0*atr; sl=close-1.0*atr
-                    else:                          tp=close+2.5*atr; sl=close-0.6*atr
+                    tp   = close+4.0*atr; sl=close-2.0*atr
                     rr   = (tp-close)/max(close-sl,0.01)
                     e9=float(r['EMA9']); e21=float(r['EMA21']); e50=float(r['EMA50'])
                     trend = "▲ UP" if e9>e21>e50 else("▼ DOWN" if e9<e21<e50 else"◆ SIDE")
@@ -1446,7 +1376,7 @@ with tab_scanner:
 
                     results.append({
                         "Ticker":stock_map.get(ticker_yf, ticker_raw),"Price":int(close),"Score":sc,
-                        "Signal":sig,"Sinyal_v2":sig_v2,"Aksi_v2":aksi_v2,
+                        "Signal":sig,"Sinyal_v2":sig,"Aksi_v2":aksi_v2,
                         "Trend":trend,"RSI-EMA":round(float(r['RSI_EMA']),1),
                         "Stoch K":round(float(r['STOCH_K']),1),"Stoch D":round(float(r['STOCH_D']),1),
                         "MACD Hist":round(float(r['MACD_Hist']),4),"RVOL":round(rvol,2),
@@ -1490,7 +1420,7 @@ with tab_scanner:
         _mnt_cd  = int(_rem_cd//60); _sec_cd=int(_rem_cd%60)
         _last_cd = datetime.fromtimestamp(st.session_state.last_scan_time,jakarta_tz).strftime("%H:%M:%S")
         _el      = int(_now_cd-st.session_state.last_scan_time)
-        st.caption(f"⏱️ Scan {_el//60}m {_el%60}s lalu · Refresh dalam: {_mnt_cd:02d}:{_sec_cd:02d} · Last: {_last_cd} WIB")
+        st.caption(f"⏱️ Scan {_el//60}m {_el%60}s lalu · Refresh dalam: {_mnt_cd:02d}:{_sec_cd:02d} · Last: {_last_cd} WIB · {'🔄 Fresh' if force_fresh else '💾 Cache'}")
 
     results = st.session_state.scan_results
     if not results and not do_scan_btn and not auto_trigger:
@@ -1506,7 +1436,6 @@ with tab_scanner:
     elif results:
         df_out = pd.DataFrame(results).sort_values("Score",ascending=False).reset_index(drop=True)
         gacor  = df_out[df_out["Signal"].str.contains("GACOR|REVERSAL|HAKA|SUPER|BANDAR",na=False)]
-        bagger = df_out[df_out["Signal"].str.contains("BAGGER|KANDIDAT",na=False)]
         potensi= df_out[df_out["Signal"].str.contains("POTENSIAL|REBOUND|AKUM",na=False)]
         avg_rsi= df_out['RSI-EMA'].mean()
 
@@ -1527,9 +1456,7 @@ with tab_scanner:
             <div class="metric-value" style="font-size:13px;margin-top:4px;">{scan_mode}</div></div>
           <div class="metric-card green"><div class="metric-label">Signal Lolos</div>
             <div class="metric-value">{len(df_out)}</div><div class="metric-sub">dari {len(raw_stocks)} emiten</div></div>
-          <div class="metric-card" style="border-top-color:#bf5fff"><div class="metric-label">BAGGER 💎</div>
-            <div class="metric-value" style="color:#bf5fff">{len(bagger)}</div><div class="metric-sub">Wyckoff candidate</div></div>
-          <div class="metric-card red"><div class="metric-label">GACOR 🔥</div>
+          <div class="metric-card red"><div class="metric-label">GACOR/BANDAR 🔥</div>
             <div class="metric-value">{len(gacor)}</div></div>
           <div class="metric-card amber"><div class="metric-label">POTENSIAL</div>
             <div class="metric-value">{len(potensi)}</div></div>
@@ -1566,16 +1493,11 @@ with tab_scanner:
         # Ticker tape
         th='<div class="tape-wrap"><div class="tape-inner">'
         for _,row in df_out.iterrows():
-            roc=row['ROC 3B%']
-            is_bag="BAGGER" in row['Signal'] or "KANDIDAT" in row['Signal']
-            cls='bagger' if is_bag else('up' if roc>0 else('down' if roc<0 else'flat'))
-            sym='💎' if is_bag else('▲' if roc>0 else('▼' if roc<0 else'─'))
+            roc=row['ROC 3B%']; cls='up' if roc>0 else('down' if roc<0 else'flat'); sym='▲' if roc>0 else('▼' if roc<0 else'─')
             th+=f'<span class="tape-item {cls}">{row["Ticker"]} {int(row["Price"])} {sym}{abs(roc):.1f}% [{row["Signal"]}]</span>'
         th+=th.replace('tape-inner">',''); th+='</div></div>'
         st.markdown(th, unsafe_allow_html=True)
 
-        if not bagger.empty:
-            st.markdown(f'''<div class="bagger-alert-box"><div class="bagger-title">💎 WYCKOFF BAGGER ALERT · {len(bagger)} KANDIDAT · AKUMULASI + BREAKOUT</div><div style="font-size:11px;color:#4a5568;margin-top:4px;">Phase A-B (Sideways+Dry Vol) · Spring/Shakeout · Phase D (RVOL+Breakout)</div></div>''', unsafe_allow_html=True)
         if not gacor.empty:
             st.markdown(f'<div class="alert-box"><div class="alert-title">🚨 GACOR ALERT · {len(gacor)} SAHAM · {scan_mode}</div></div>', unsafe_allow_html=True)
 
@@ -1602,13 +1524,10 @@ with tab_scanner:
             card_html='<div class="signal-grid">'
             for _,row in df_out.head(20).iterrows():
                 sc_int=int(row['Score'])
-                is_bag="BAGGER" in row['Signal'] or "KANDIDAT" in row['Signal']
-                bar_cls="filled-purple" if is_bag else "filled"
-                bars=''.join([f'<div class="sc-bar {bar_cls if i<sc_int else "empty"}" style="width:28px"></div>' for i in range(6)])
+                bars=''.join([f'<div class="sc-bar {"filled" if i<sc_int else "empty"}" style="width:28px"></div>' for i in range(6)])
                 roc_c='#00ff88' if row['ROC 3B%']>0 else'#ff3d5a'
                 te="📈" if "▲" in row['Trend'] else("📉" if "▼" in row['Trend'] else"➡️")
                 fd=row.get("FDir","—"); fc=row.get("FC","#4a5568")
-                sig_color='#bf5fff' if is_bag else('#00ff88' if sc_int>=5 else '#ffb700' if sc_int>=4 else '#00e5ff')
                 card_html+=f"""<div class="signal-card {row['_class']}">
                   <div style="display:flex;justify-content:space-between;align-items:flex-start;">
                     <div><div class="sc-ticker">{row['Ticker']}</div>
@@ -1618,7 +1537,7 @@ with tab_scanner:
                       <div style="font-family:Space Mono,monospace;font-size:20px;font-weight:700;color:{'#00ff88' if sc_int>=5 else '#ffb700' if sc_int>=4 else '#00e5ff'}">{row['Score']}</div>
                     </div>
                   </div>
-                  <div class="sc-signal" style="color:{sig_color}">{row['Signal']}</div>
+                  <div class="sc-signal" style="color:{'#00ff88' if 'GACOR' in row['Signal'] or 'HAKA' in row['Signal'] else '#ffb700' if 'POTENSIAL' in row['Signal'] or 'REBOUND' in row['Signal'] else '#4da6ff' if 'BANDAR' in row['Signal'] else '#00e5ff'}">{row['Signal']}</div>
                   <div class="sc-bars">{bars}</div>
                   <div class="sc-stats">
                     <div class="sc-stat">RSI-EMA <span>{row['RSI-EMA']}</span></div>
@@ -1690,11 +1609,11 @@ with tab_watchlist:
     with wc1:
         wl_input = st.text_area("Ticker", placeholder="Contoh:\nBBCA\nARCI, ASSA, GOTO", height=120, label_visibility="collapsed", key="wl_input")
     with wc2:
-        wl_mode = st.radio("Mode", ["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"], key="wl_mode")
+        wl_mode = st.radio("Mode", ["Scalping ⚡","Momentum 🚀","Reversal 🎯"], key="wl_mode")
         st.caption(f"Regime suggest: {rcfg['mode']}")
     with wc3:
         st.markdown("<br>", unsafe_allow_html=True)
-        wl_force = st.toggle("🔄 Fresh", value=False, key="wl_fresh")
+        # Fresh data toggle removed — DS cache TTL handle ini
         wl_run   = st.button("🔍 Analisa", use_container_width=True, key="wl_run")
         wl_tele  = st.button("📡 Kirim Telegram", use_container_width=True, key="wl_tele")
 
@@ -1709,10 +1628,11 @@ with tab_watchlist:
                 df = None
                 try:
                     if DS_KEY:
-                        df = fetch_ds_ohlcv(t, "15m", 200, wl_force)
+                        df = fetch_ds_ohlcv(t, "15m", 200, False)
                     if df is None:
                         raw = yf.download(t+".JK", period="5d", interval="15m",
-                                          progress=False, auto_adjust=True, threads=False)
+                                          progress=False, auto_adjust=True,
+                                          threads=False, session=_YF_SESSION)
                         if not raw.empty:
                             if isinstance(raw.columns,pd.MultiIndex): raw.columns=raw.columns.droplevel(1)
                             df = raw.dropna()
@@ -1727,13 +1647,10 @@ with tab_watchlist:
                     df2 = apply_intraday_indicators(df.copy())
                     r=df2.iloc[-1]; p=df2.iloc[-2]; p2=df2.iloc[-3] if len(df2)>=3 else p
                     close=float(r['Close']); atr=float(r['ATR'])
-                    if wl_mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p,p2); tp=close+1.5*atr; sl=close-0.8*atr
-                    elif wl_mode=="Momentum 🚀": sc,reasons,_=score_momentum(r,p,p2); tp=close+2.0*atr; sl=close-0.8*atr
-                    elif wl_mode=="Bagger 💎":   sc,reasons,_=score_bagger(r,p,p2,df2); tp=close+3.0*atr; sl=close-1.0*atr
-                    else:                        sc,reasons,_=score_reversal(r,p,p2); tp=close+2.5*atr; sl=close-0.6*atr
-                    sig = get_signal(sc, wl_mode)
-                    sig_v2,sc_v2,flags_v2,gc_now = get_sinyal_v2(r,p,p2)
-                    rr=(tp-close)/max(close-sl,0.01)
+                    sig,sc_v2,flags_v2,gc_now = get_sinyal_v2(r,p,p2)
+                    sc=round(min(6,max(0,sc_v2/10)),1)
+                    reasons=flags_v2.split(" · ") if flags_v2 else []
+                    tp=close+4.0*atr; sl=close-2.0*atr; rr=(tp-close)/max(close-sl,0.01)
                     e9=float(r['EMA9']); e21=float(r['EMA21']); e50=float(r['EMA50'])
                     trend="▲ UP" if e9>e21>e50 else("▼ DOWN" if e9<e21<e50 else"◆ SIDE")
                     wl_res.append({"Ticker":t,"Price":int(close),"Score":sc,"Signal":sig,
@@ -1824,7 +1741,7 @@ with tab_bsjp:
         bsjp_min_rvol =st.slider("Min RVOL",1.0,5.0,1.5,0.1,key="bsjp_rvol")
     with bc2:
         bsjp_min_turn=st.number_input("Min Turnover (M Rp)",value=500,step=100,key="bsjp_turn")*1_000_000
-    # Fresh data via cache TTL otomatis (no toggle needed)
+        bsjp_fresh=st.toggle("🔄 Fresh Data",value=False,key="bsjp_fresh")
 
     do_bsjp=st.button("🌙 SCAN BSJP SEKARANG",type="primary",use_container_width=True,key="btn_bsjp")
 
@@ -1833,7 +1750,7 @@ with tab_bsjp:
         if not scan_data:
             _pb2=st.progress(0)
             st.info("Fetching data untuk BSJP...")
-            scan_data=fetch_intraday(tuple(stocks_yf[:200]))
+            scan_data=fetch_intraday(tuple(stocks_yf[:200]), force_fresh=bsjp_fresh)
             _pb2.empty()
         pb_bsjp=st.progress(0); tickers_bsjp=list(scan_data.keys())
         for i,ticker_yf in enumerate(tickers_bsjp):
@@ -2009,7 +1926,8 @@ with tab_trail:
             df_tr=None
             if DS_KEY: df_tr=fetch_ds_ohlcv(tr_ticker,"15m",200)
             if df_tr is None:
-                raw_tr=yf.download(tr_ticker+".JK",period="5d",interval="15m",progress=False,auto_adjust=True,threads=False)
+                raw_tr=yf.download(tr_ticker+".JK",period="5d",interval="15m",
+                progress=False,auto_adjust=True,threads=False,session=_YF_SESSION)
                 if not raw_tr.empty:
                     if isinstance(raw_tr.columns,pd.MultiIndex): raw_tr.columns=raw_tr.columns.droplevel(1)
                     df_tr=raw_tr.dropna()
@@ -2050,7 +1968,7 @@ with tab_trail:
 with tab_backtest:
     st.markdown('<div class="section-title">Backtest Engine · 15M Intraday</div>', unsafe_allow_html=True)
     bt_c1,bt_c2,bt_c3,bt_c4=st.columns(4)
-    bt_mode   =bt_c1.selectbox("Mode",["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"],key="bt_mode")
+    bt_mode   =bt_c1.selectbox("Mode",["Scalping ⚡","Momentum 🚀","Reversal 🎯"],key="bt_mode")
     bt_sc     =bt_c2.slider("Min Score",0,6,4,key="bt_sc")
     bt_fwd    =int(bt_c3.number_input("Hold (bars)",value=4,step=1,min_value=1,max_value=20))
     bt_sl_mult=bt_c4.number_input("SL mult (x ATR)",value=0.8,step=0.1,min_value=0.1,max_value=3.0)
@@ -2071,12 +1989,10 @@ with tab_backtest:
                         r0=d.iloc[ii]; r1=d.iloc[ii-1]; r2=d.iloc[ii-2]
                         if bt_mode=="Scalping ⚡":   sc,_,_=score_scalping(r0,r1,r2)
                         elif bt_mode=="Momentum 🚀": sc,_,_=score_momentum(r0,r1,r2)
-                        elif bt_mode=="Bagger 💎":   sc,_,_=score_bagger(r0,r1,r2,d.iloc[:ii+1])
                         else:                         sc,_,_=score_reversal(r0,r1,r2)
                         if sc<bt_sc: continue
                         entry=float(r0['Close']); atr_v=float(r0['ATR']) if not np.isnan(float(r0['ATR'])) else entry*0.005
-                        if bt_mode=="Bagger 💎": tp_p=entry+3.0*atr_v; sl_p=entry-1.0*atr_v
-                        else: tp_p=entry+2.0*atr_v; sl_p=entry-bt_sl_mult*atr_v
+                        tp_p=entry+2.0*atr_v; sl_p=entry-bt_sl_mult*atr_v
                         exit_price=float(d.iloc[ii+bt_fwd]['Close'])
                         for fwd_i in range(1,bt_fwd+1):
                             bar=d.iloc[ii+fwd_i]
@@ -2107,34 +2023,46 @@ with tab_backtest:
                   </div></div>""", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════
-#  FOOTER + AUTO-REFRESH
-#  Sama persis yfinance version:
-#  - auto_trigger di atas handle rescan tiap 300s
-#  - st.rerun() dipanggil di sini kalau waktunya
+#  FOOTER + AUTO-REFRESH — JavaScript Timer
+#  st.rerun() tidak jalan saat page idle (tidak ada interaksi).
+#  JS timer jalan di browser → reload otomatis tiap 5 menit.
 # ════════════════════════════════════════════════════
+import streamlit.components.v1 as _components
+
 _now_f      = now_jkt.timestamp()
+is_open_now = 9 <= now_jkt.hour < 16
 
 if st.session_state.last_scan_time:
-    _rem2   = max(0, 300 - (_now_f - st.session_state.last_scan_time))
-    mnt2    = int(_rem2 // 60); sec2 = int(_rem2 % 60)
-    last_t2 = datetime.fromtimestamp(st.session_state.last_scan_time, jakarta_tz).strftime("%H:%M:%S")
-    time_info = f"⏱️ Next auto-scan: <span style='color:#ff7b00'>{mnt2:02d}:{sec2:02d}</span> · Last: <span style='color:#2dd4bf'>{last_t2} WIB</span>"
+    _rem2    = max(0, 480 - (_now_f - st.session_state.last_scan_time))
+    mnt2     = int(_rem2 // 60); sec2 = int(_rem2 % 60)
+    last_t2  = datetime.fromtimestamp(st.session_state.last_scan_time, jakarta_tz).strftime("%H:%M:%S")
+    elapsed_s= int(_now_f - st.session_state.last_scan_time)
+    time_info= f"⏱️ Next: <span style='color:#ff7b00'>{mnt2:02d}:{sec2:02d}</span> · Last: <span style='color:#2dd4bf'>{last_t2} WIB</span> · ⚡ DataSectors"
 else:
-    _rem2 = 300
-    time_info = "⏱️ Klik Scan untuk mulai"
+    _rem2 = 300; elapsed_s = 0
+    time_info = "⏱️ Klik Scan untuk mulai · ⚡ DataSectors"
 
 st.markdown(f"""
 <div style="margin-top:28px;padding-top:14px;border-top:1px solid #1c2533;
      display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">
-    🔥 Theta Turbo v5.2 · DataSectors ⚡ + yFinance · Auto Regime · IDX 900+
+    🔥 Theta Turbo v5.2 · DataSectors ⚡ · Auto-refresh 5m
   </div>
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">{time_info}</div>
 </div>""", unsafe_allow_html=True)
 
-# Auto-rerun — persis yfinance version (simple, no JS conflict)
-if st.session_state.last_scan_time:
-    _elapsed_f = _now_f - st.session_state.last_scan_time
-    if _elapsed_f >= 295:
-        time.sleep(5)
-        st.rerun()
+# JS timer → reload browser otomatis, tidak butuh interaksi user
+# st.rerun() DIHAPUS → bikin infinite loop di Streamlit Cloud!
+# KUNCI: hanya inject timer kalau BELUM waktunya reload (elapsed < 480)
+# Kalau elapsed >= 480 → auto_trigger sudah handle rescan, jangan loop!
+if is_open_now and st.session_state.scan_results and st.session_state.last_scan_time:
+    if elapsed_s < 480:  # hanya kalau belum waktunya
+        _rem_ms = max(10000, int(_rem2 * 1000))  # min 10 detik
+        _components.html(
+            f"""<script>
+            if(window._tt_timer) clearTimeout(window._tt_timer);
+            window._tt_timer = setTimeout(function(){{
+                window.parent.location.reload();
+            }}, {_rem_ms});
+            </script>""",
+            height=0)
