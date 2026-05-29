@@ -1269,6 +1269,7 @@ with tab_scanner:
                     unsafe_allow_html=True)
                 BATCH_SZ = 10; DELAY_OK = random.uniform(2.0, 5.0); DELAY_429 = random.uniform(15.0, 25.0)
                 for i_yf in range(0, len(missing_yf), BATCH_SZ):
+                    batch_yf = missing_yf[i_yf:i_yf + BATCH_SZ]
                     for t_yf in batch_yf:
                         if t_yf in data_dict: continue
                         _iv  = "1d"  if _is_bagger_scan else "15m"
