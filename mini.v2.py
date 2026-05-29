@@ -1206,55 +1206,68 @@ with tab_scanner:
                     f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">' 
                     f'📊 yFinance fallback: {len(missing_yf)} ticker · {_scan_tf.upper()} · batch download...</div>',
                     unsafe_allow_html=True)
-                for i_yf in range(0, len(missing_yf), 25):
-                    batch_yf = missing_yf[i_yf:i_yf+25]
-                    try:
-                        raw_yf = yf.download(
-                            list(batch_yf),
-                            period=_scan_period, interval=_scan_tf,
-                            group_by='ticker', progress=False,
-                            threads=True, auto_adjust=True)
-                        for t_yf in batch_yf:
-                            try:
-                                df_yf = _yf_extract(raw_yf, t_yf, len(batch_yf))
-                                if df_yf is not None and len(df_yf) >= _min_bars:
-                                    data_dict[t_yf] = df_yf
-                            except: pass
-                    except: pass
-                    pct = 0.50 + (i_yf + 25) / max(len(missing_yf), 1) * 0.25
+                BATCH_SZ = 10; DELAY_OK = 3.0; DELAY_429 = 20.0
+                for i_yf in range(0, len(missing_yf), BATCH_SZ):
+                    batch_yf = missing_yf[i_yf:i_yf + BATCH_SZ]
+                    for _attempt in range(3):
+                        try:
+                            raw_yf = yf.download(
+                                list(batch_yf),
+                                period=_scan_period, interval=_scan_tf,
+                                group_by='ticker', progress=False,
+                                threads=False, auto_adjust=True)  # threads=False!
+                            for t_yf in batch_yf:
+                                try:
+                                    df_yf = _yf_extract(raw_yf, t_yf, len(batch_yf))
+                                    if df_yf is not None and len(df_yf) >= _min_bars:
+                                        data_dict[t_yf] = df_yf
+                                except: pass
+                            break
+                        except Exception as _e:
+                            if "rate" in str(_e).lower() or "429" in str(_e):
+                                time.sleep(DELAY_429); continue
+                            break
+                    pct = 0.50 + (i_yf + BATCH_SZ) / max(len(missing_yf), 1) * 0.25
                     pb.progress(min(pct, 0.76))
-                    time.sleep(0.2)
+                    time.sleep(DELAY_OK)
                 prog_ph.markdown(
                     f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">' 
-                    f'✅ Total data: {len(data_dict)} saham siap ({len(missing_yf)} via yFinance)</div>',
+                    f'✅ yFinance: {len(data_dict)} saham siap</div>',
                     unsafe_allow_html=True)
 
             st.session_state.data_dict = data_dict
 
-            st.session_state.data_dict = data_dict
-
-            # ── Fetch daily data untuk GAIN + VAL yang akurat ──
-            prog_ph.markdown(
-                f'<div style="color:#00e5ff;font-family:Space Mono,monospace;font-size:11px;">'
-                f'📅 Fetching daily context untuk Gain & Val...</div>',
-                unsafe_allow_html=True)
+            # ── Daily context: RESAMPLE dari 15m — ZERO extra download! ──
+            # Eliminates entire batch daily download = 0 extra Yahoo requests
             daily_dict = {}
-            need_daily = [t for t in ticker_list]
-            def _fd(t):
-                raw_t = t.replace(".JK","").upper()
-                # Try cache first
-                cached = _cache_get(raw_t, "daily")
-                if cached is not None: return t, cached
-                df = fetch_ds_ohlcv(raw_t, "daily", 100, False)
-                return t, df
-            with ThreadPoolExecutor(max_workers=10) as ex:
-                futs = {ex.submit(_fd, t): t for t in need_daily}
-                for f in as_completed(futs):
-                    try:
-                        t, df = f.result(timeout=15)
-                        if df is not None and len(df) >= 2:
-                            daily_dict[t] = df
-                    except: pass
+            for _t, _df15 in data_dict.items():
+                try:
+                    _df_d = _df15.resample("1D").agg({
+                        "Open":"first","High":"max","Low":"min",
+                        "Close":"last","Volume":"sum"
+                    }).dropna(subset=["Close"])
+                    _df_d = _df_d[_df_d["Volume"] > 0]
+                    if len(_df_d) >= 2:
+                        daily_dict[_t] = _df_d
+                except: pass
+            # DS daily (FBuy/FSell) — bonus, via cache, no yFinance
+            if DS_KEY:
+                def _fd(t):
+                    raw_t = t.replace(".JK","").upper()
+                    cached = _cache_get(raw_t, "daily")
+                    if cached is not None: return t, cached
+                    df = fetch_ds_ohlcv(raw_t, "daily", 100, False)
+                    return t, df
+                try:
+                    with ThreadPoolExecutor(max_workers=5) as ex:
+                        futs = {ex.submit(_fd, t): t for t in list(data_dict.keys())}
+                        for f in as_completed(futs):
+                            try:
+                                t, df = f.result(timeout=12)
+                                if df is not None and len(df) >= 2:
+                                    daily_dict[t] = df
+                            except: pass
+                except: pass
             st.session_state.daily_dict = daily_dict
 
             # ── PHASE 2: Process ──
