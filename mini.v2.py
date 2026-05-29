@@ -10,11 +10,6 @@ import threading
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-try:
-    from streamlit_autorefresh import st_autorefresh
-    _HAS_AR = True
-except ImportError:
-    _HAS_AR = False
 
 # ════════════════════════════════════════════════════
 #  CONFIG
@@ -35,7 +30,7 @@ DS_BASE = "https://api.datasectors.com"
 #  FIX: @st.cache_data TIDAK thread-safe di ThreadPoolExecutor!
 #  Solusi: pickle di ~/.hp_cache + memory dict + threading.Lock
 # ════════════════════════════════════════════════════
-CACHE_DIR = Path("/tmp/hp_cache") if Path("/tmp").exists() else Path.home() / ".hp_cache"
+CACHE_DIR = Path.home() / ".hp_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 CACHE_TTL  = 300   # 5 menit
 _mem       = {}
@@ -173,47 +168,15 @@ def fetch_ds_ohlcv(ticker, interval="15m", limit=200, force_fresh=False):
 # ════════════════════════════════════════════════════
 #  SESSION STATE
 # ════════════════════════════════════════════════════
-# ── Disk persistence for scan results ──
-_TT_RESULTS_FILE = CACHE_DIR / "tt_last_results.pkl"
-_TT_RESULTS_TTL  = 1800  # 30 menit — cukup untuk idle antar scan
-
-def _tt_save(results, ts):
-    try: _TT_RESULTS_FILE.write_bytes(pickle.dumps({"results":results,"ts":ts}))
-    except: pass
-
-def _tt_load():
-    try:
-        if _TT_RESULTS_FILE.exists():
-            d = pickle.loads(_TT_RESULTS_FILE.read_bytes())
-            if time.time()-d["ts"] < _TT_RESULTS_TTL: return d
-    except: pass
-    return None
-
 for _k, _v in [("tt_last_sent", set()), ("wl_results", []),
                 ("wl_mode_used", ""), ("scan_results", []),
                 ("data_dict", {}), ("last_scan_time", None),
                 ("last_scan_mode", "Scalping ⚡"),
                 ("bsjp_results", []), ("gapup_results", []),
-                ("sector_data", {}), ("beta_data", []),
-                # ss_* = sumber kebenaran saat auto_trigger
-                ("ss_scan_mode",   "Scalping ⚡"),
-                ("ss_min_score",   4),
-                ("ss_vol_thresh",  1.5),
-                ("ss_min_turn",    500_000_000),
-                ("ss_auto_thresh", True),]:
+                ("sector_data", {}), ("beta_data", [])]:
     if _k not in st.session_state: st.session_state[_k] = _v
 
-# Auto-restore dari disk setelah browser refresh
-if not st.session_state.scan_results:
-    _tt_saved = _tt_load()
-    if _tt_saved:
-        st.session_state.scan_results = _tt_saved["results"]
-        st.session_state.last_scan_time = _tt_saved["ts"]
-
 st.set_page_config(layout="wide", page_title="Theta Turbo v5", page_icon="🔥", initial_sidebar_state="collapsed")
-# Auto-refresh: cek tiap 60s, scan trigger kalau elapsed >= 300s
-if _HAS_AR:
-    _ar_count = st_autorefresh(interval=60_000, limit=None, key="tt_autorefresh")
 
 st.markdown("""
 <style>
@@ -288,105 +251,104 @@ button[data-testid="baseButton-primary"]{background:var(--orange)!important;colo
 #  STOCK LIST
 # ════════════════════════════════════════════════════
 raw_stocks = [
-    "AADI", "AALI", "ABBA", "ABDA", "ABMM", "ACES", "ACRO", "ACST", "ADCP", "ADES", 
-    "ADHI", "ADMF", "ADMG", "ADMR", "ADRO", "AEGS", "AGAR", "AGII", "AGRO", "AGRS", 
-    "AHAP", "AIMS", "AISA", "AKKU", "AKPI", "AKRA", "AKSI", "ALDO", "ALII", "ALKA", 
-    "ALMI", "ALTO", "AMAG", "AMAN", "AMAR", "AMFG", "AMIN", "AMMN", "AMMS", "AMOR", 
-    "AMRT", "ANDI", "ANJT", "ANTM", "APEX", "APIC", "APII", "APLI", "APLN", "ARCI", 
-    "AREA", "ARGO", "ARII", "ARKA", "ARKO", "ARMY", "ARNA", "ARTA", "ARTI", "ARTO", 
-    "ASBI", "ASDM", "ASGR", "ASHA", "ASII", "ASJT", "ASLI", "ASLC", "ASMI", "ASPI", 
-    "ASPR", "ASRI", "ASRM", "ASSA", "ATAP", "ATIC", "ATLA", "AUTO", "AVIA", "AWAN", 
-    "AXIO", "AYAM", "AYLS", "BABA", "BABP", "BABY", "BACA", "BAIK", "BAJA", "BALI", 
-    "BANK", "BAPA", "BAPI", "BATA", "BATR", "BAUT", "BAYU", "BBCA", "BBHI", "BBKP", 
-    "BBLD", "BBMD", "BBNI", "BBRI", "BBRM", "BBSI", "BBSS", "BBTN", "BBYB", "BCAP", 
-    "BCIC", "BCIP", "BDKR", "BDMN", "BEBS", "BEEF", "BEER", "BEKS", "BELI", "BELL", 
-    "BESS", "BEST", "BFIN", "BGTG", "BHAT", "BHIT", "BIAS", "BIKA", "BIKE", "BIMA", 
-    "BINA", "BINO", "BIPI", "BIPP", "BIRD", "BISI", "BIWA", "BJBR", "BJTM", "BKDP", 
-    "BKSL", "BKSW", "BLES", "BLOG", "BLTA", "BLTZ", "BLUE", "BMAS", "BMBL", "BMHS", 
-    "BMRI", "BMSR", "BMTR", "BNBA", "BNBR", "BNGA", "BNII", "BNLI", "BOAT", "BOBA", 
-    "BOGA", "BOLA", "BOLT", "BOSS", "BPFI", "BPII", "BPTR", "BRAM", "BREN", "BRIS", 
-    "BRMS", "BRNA", "BRPT", "BRRC", "BSBK", "BSDE", "BSIM", "BSML", "BSSR", "BSWD", 
-    "BTEK", "BTEL", "BTON", "BTPN", "BTPS", "BUAH", "BUDI", "BUKA", "BUKK", "BULL", 
-    "BUMI", "BUVA", "BVIC", "BWPT", "BYAN", "CAKK", "CAMP", "CANI", "CARE", "CARS", 
-    "CASA", "CASH", "CASS", "CBDK", "CBPE", "CBRE", "CBUT", "CBMF", "CCSI", "CDIA", 
-    "CEKA", "CENT", "CFIN", "CGAS", "CHEK", "CHEM", "CHIP", "CINT", "CITA", "CITY", 
-    "CLAY", "CLEO", "CLPI", "CMNP", "CMNT", "CMPP", "CMRY", "CNKO", "CNMA", "CNTX", 
-    "COAL", "COCO", "COIN", "COWL", "CPIN", "CPRI", "CPRO", "CRAB", "CRSN", "CSAP", 
-    "CSIS", "CSMI", "CSRA", "CTBN", "CTRA", "CTTH", "CUAN", "CYBR", "DAAZ", "DADA", 
-    "DART", "DATA", "DAYA", "DCII", "DEAL", "DEFI", "DEPO", "DEWA", "DEWI", "DFAM", 
-    "DGNS", "DGWG", "DGIK", "DIGI", "DILD", "DIVA", "DKFT", "DKHH", "DLTA", "DMAS", 
-    "DMMX", "DMND", "DNAR", "DNET", "DOID", "DOOH", "DOSS", "DPNS", "DPUM", "DRMA", 
-    "DSFI", "DSNG", "DSSA", "DUCK", "DUTI", "DVLA", "DWGL", "DYAN", "EAST", "ECII", 
-    "EDGE", "EKAD", "ELIT", "ELPI", "ELSA", "ELTY", "EMAS", "EMDE", "EMTK", "ENAK", 
-    "ENRG", "ENVY", "ENZO", "EPAC", "EPMT", "ERAL", "ERAA", "ERTX", "ESIP", "ESSA", 
-    "ESTA", "ESTI", "ETWA", "EURO", "EXCL", "FAPA", "FAST", "FASW", "FILM", "FIMP", 
-    "FIRE", "FISH", "FITT", "FLMC", "FOLK", "FOOD", "FORE", "FORU", "FPNI", "FUJI", 
-    "FUTR", "FWCT", "GAMA", "GDST", "GDYR", "GEMA", "GEMS", "GGRP", "GGRM", "GHON", 
-    "GIAA", "GJTL", "GLOB", "GLVA", "GMFI", "GMTD", "GOLF", "GOLD", "GOLL", "GOOD", 
-    "GOTO", "GPRA", "GPSO", "GRIA", "GRPH", "GRPM", "GRII", "GSMF", "GTBO", "GTRA", 
-    "GTSI", "GULA", "GUNA", "GWSA", "GZCO", "HADE", "HAIS", "HAJJ", "HALO", "HATM", 
-    "HBAT", "HDFA", "HDIT", "HEAL", "HELI", "HERO", "HEXA", "HGII", "HILL", "HITS", 
-    "HKMU", "HMSP", "HOKI", "HOME", "HOMI", "HOPE", "HOTL", "HRME", "HRTA", "HRUM", 
-    "HUMI", "HYGN", "IATA", "IBFN", "IBOS", "IBST", "ICBP", "ICON", "IDEA", "IDPR", 
-    "IFII", "IFSH", "IGAR", "IIKP", "IKAI", "IKAN", "IKBI", "IKPM", "IMAS", "IMJS", 
-    "IMPC", "INAF", "INAI", "INCF", "INCI", "INCO", "INDF", "INDO", "INDR", "INDS", 
-    "INDX", "INDY", "INET", "INKP", "INOV", "INPC", "INPP", "INPS", "INRU", "INTA", 
-    "INTD", "INTP", "IOTF", "IPAC", "IPCC", "IPCM", "IPOL", "IPPE", "IPTV", "IRRA", 
-    "IRSX", "ISAP", "ISAT", "ISEA", "ISSP", "ITIC", "ITMA", "ITMG", "JAAS", "JARR", 
-    "JAST", "JATI", "JAVA", "JAYA", "JECC", "JGLE", "JIHD", "JKON", "JMAS", "JPFA", 
-    "JRPT", "JSKY", "JSMR", "JSPT", "JTPE", "KAEF", "KAQI", "KARW", "KARY", "KAST", 
-    "KAYU", "KBAG", "KBLI", "KBLM", "KBLV", "KBRI", "KDSI", "KDTN", "KEEN", "KEJU", 
-    "KETR", "KIAS", "KICI", "KIJA", "KING", "KINO", "KIOS", "KJEN", "KKES", "KKGI", 
-    "KLAS", "KLBF", "KLIN", "KMDS", "KMTR", "KOBX", "KOCI", "KOIN", "KOKA", "KONI", 
-    "KOPI", "KOTA", "KPIG", "KRAH", "KRAS", "KREN", "KSIX", "KUAS", "LABA", "LABS", 
-    "LAJU", "LAND", "LAPD", "LCGP", "LCKM", "LEAD", "LFLO", "LIFE", "LINK", "LION", 
-    "LIVE", "LMAS", "LMPI", "LMSH", "LOPI", "LPCK", "LPGI", "LPIN", "LPKR", "LPLI", 
-    "LPPF", "LPPS", "LRNA", "LSIP", "LTLS", "LUCK", "LUCY", "MAAS", "MABA", "MADA", 
-    "MAGP", "MAHA", "MAIN", "MANG", "MAPA", "MAPB", "MAPI", "MARI", "MARK", "MASA", 
-    "MASB", "MAYA", "MBAP", "MBMA", "MBSS", "MBTO", "MCAS", "MCOL", "MCOR", "MDIA", 
-    "MDKA", "MDKI", "MDLA", "MDLN", "MDRN", "MEDC", "MEDS", "MEGA", "MEJA", "MENN", 
-    "MERI", "MERK", "META", "MFMI", "MGNA", "MGRO", "MHKI", "MICE", "MIDI", "MIKA", 
-    "MINA", "MINE", "MIRA", "MITI", "MKAP", "MKPI", "MKTR", "MLBI", "MLIA", "MLPL", 
-    "MLPT", "MMLP", "MMIX", "MNCN", "MOLI", "MORA", "MPOW", "MPMX", "MPPA", "MPRO", 
-    "MPXL", "MRAT", "MREI", "MSIE", "MSIN", "MSJA", "MSKY", "MSTI", "MTDL", "MTEL", 
-    "MTFN", "MTLA", "MTMH", "MTPS", "MTRA", "MTRN", "MTSM", "MTWI", "MUTU", "MYOH", 
-    "MYOR", "MYTX", "NAIK", "NANO", "NASA", "NASI", "NATO", "NAYZ", "NCKL", "NELY", 
-    "NEST", "NETV", "NICE", "NICK", "NICL", "NIKL", "NINE", "NIRO", "NISP", "NOBU", 
-    "NPGF", "NRCA", "NSSS", "NTBK", "NUSA", "NZIA", "OASA", "OBAT", "OBMD", "OCAP", 
-    "OILS", "OKAS", "OLIV", "OMED", "OMRE", "OPMS", "PACK", "PADA", "PADI", "PALM", 
-    "PAMG", "PANI", "PANR", "PANS", "PART", "PBID", "PBSA", "PBRX", "PCAR", "PDES", 
-    "PDPP", "PEGE", "PEHA", "PELI", "PENT", "PERW", "PEVE", "PGAS", "PGEO", "PGJO", 
-    "PGLI", "PGUN", "PICO", "PIPA", "PJAA", "PJHB", "PKPK", "PLAN", "PLAS", "PLIN", 
-    "PMJS", "PMMP", "PMUI", "PNBN", "PNBS", "PNGO", "PNIN", "PNLF", "PNSE", "POLA", 
-    "POLI", "POLL", "POLU", "POLY", "POOL", "PORT", "POSA", "POWR", "PPGL", "PPRI", 
-    "PPRE", "PPRO", "PRAY", "PRDA", "PRIM", "PSAB", "PSAT", "PSDN", "PSGO", "PSKT", 
-    "PSSI", "PTBA", "PTDU", "PTIS", "PTMP", "PTMR", "PTPP", "PTPS", "PTPW", "PTRO", 
-    "PTSN", "PTSP", "PUDP", "PURA", "PURE", "PURI", "PWON", "PYFA", "PZZA", "RAAM", 
-    "RAFI", "RAJA", "RALS", "RANC", "RATU", "RBMS", "RCCC", "RDTX", "REAL", "RELF", 
-    "RELI", "REPP", "RGAS", "RICY", "RIGS", "RIMO", "RISE", "RLCO", "RMBA", "RMKE", 
-    "RMKO", "RMLP", "ROCK", "RODA", "ROLI", "RONY", "ROTI", "RSCH", "RSGK", "RUIS", 
-    "RUNS", "SAFE", "SAGE", "SAGI", "SAME", "SAMF", "SAMR", "SAMP", "SANO", "SAPX", 
-    "SATU", "SBAT", "SBMA", "SCCO", "SCMA", "SCNP", "SCPI", "SDMU", "SDPC", "SDRA", 
-    "SEMA", "SFAN", "SGER", "SGGH", "SGJL", "SGRO", "SHID", "SHIP", "SICO", "SIDO", 
-    "SIER", "SILO", "SIMA", "SIMP", "SINI", "SIPD", "SKBM", "SKLT", "SKRN", "SKYB", 
-    "SLIS", "SMAR", "SMDM", "SMDR", "SMGA", "SMGR", "SMKM", "SMKL", "SMLE", "SMMA", 
-    "SMMT", "SMRA", "SMRU", "SMSM", "SNLK", "SOCI", "SOFA", "SOHO", "SOLA", "SONA", 
-    "SOSS", "SOTS", "SOUL", "SPMA", "SPRE", "SPTO", "SQMI", "SRAJ", "SREI", "SRIL", 
-    "SRSN", "SRTG", "SSIA", "SSMS", "SSTM", "STAA", "STAR", "STRK", "STTP", "SUGI", 
-    "SULI", "SUNI", "SUPA", "SUPR", "SURE", "SWAT", "SWID", "SYAI", "TALF", "TAMA", 
-    "TAMU", "TAPG", "TARA", "TAXI", "TAYS", "TBIG", "TBLA", "TBMS", "TCID", "TCPI", 
-    "TDPM", "TEBE", "TECH", "TELE", "TFAS", "TFCO", "TGKA", "TGRA", "TGUK", "TIFA", 
-    "TINS", "TIRA", "TIRT", "TKIM", "TLDN", "TLKM", "TMAS", "TMPO", "TNCA", "TOBA", 
-    "TOOL", "TOPS", "TOSK", "TOTL", "TOTO", "TOWR", "TOYS", "TPAI", "TPIA", "TPMA", 
-    "TRAM", "TRGU", "TRIL", "TRIM", "TRIN", "TRIO", "TRIS", "TRJA", "TRON", "TRST", 
-    "TRUE", "TRUK", "TRUS", "TSPC", "TUGU", "TULT", "TYRE", "UANG", "UCID", "UDNG", 
-    "UFOE", "ULTJ", "UNIC", "UNIQ", "UNIT", "UNSP", "UNTR", "UNVR", "URBN", "UVCR", 
-    "VAST", "VATE", "VCOK", "VERN", "VICI", "VICO", "VINS", "VISA", "VISI", "VIVA", 
-    "VKTR", "VOKS", "VOSS", "VRNA", "VTNY", "WAPO", "WBSA", "WEGE", "WEHA", "WGSH", 
-    "WICO", "WIDI", "WIFI", "WIIM", "WIKA", "WINE", "WINR", "WINS", "WIRG", "WITA", 
-    "WMPP", "WMUU", "WOMF", "WONS", "WOOD", "WOWS", "WPOW", "WSBP", "WSKT", "WTON", 
-    "YELO", "YOII", "YPAS", "YULE", "YUPI", "ZATA", "ZBRA", "ZENI", "ZINC", "ZONE", 
-    "ZYRX"
+    "AADI","AALI","ABBA","ABDA","ABMM","ACES","ACRO","ACST","ADCP","ADES",
+    "ADHI","ADMF","ADMG","ADMR","ADRO","AEGS","AGAR","AGII","AGRO","AGRS",
+    "AHAP","AIMS","AISA","AKKU","AKPI","AKRA","AKSI","ALDO","ALII","ALKA",
+    "ALMI","ALTO","AMAG","AMAN","AMAR","AMFG","AMIN","AMMN","AMMS","AMOR",
+    "AMRT","ANDI","ANJT","ANTM","APEX","APIC","APII","APLI","APLN","ARCI",
+    "AREA","ARGO","ARII","ARKA","ARKO","ARMY","ARNA","ARTA","ARTI","ARTO",
+    "ASBI","ASDM","ASGR","ASHA","ASII","ASJT","ASLI","ASLC","ASMI","ASPI",
+    "ASPR","ASRI","ASRM","ASSA","ATAP","ATIC","ATLA","AUTO","AVIA","AWAN",
+    "AXIO","AYAM","AYLS","BABA","BABP","BABY","BACA","BAIK","BAJA","BALI",
+    "BANK","BAPA","BAPI","BATA","BATR","BAUT","BAYU","BBCA","BBHI","BBKP",
+    "BBLD","BBMD","BBNI","BBRI","BBRM","BBSI","BBSS","BBTN","BBYB","BCAP",
+    "BCIC","BCIP","BDKR","BDMN","BEBS","BEEF","BEER","BEKS","BELI","BELL",
+    "BESS","BEST","BFIN","BGTG","BHAT","BHIT","BIAS","BIKA","BIKE","BIMA",
+    "BINA","BINO","BIPI","BIPP","BIRD","BISI","BIWA","BJBR","BJTM","BKDP",
+    "BKSL","BKSW","BLES","BLOG","BLTA","BLTZ","BLUE","BMAS","BMBL","BMHS",
+    "BMRI","BMSR","BMTR","BNBA","BNBR","BNGA","BNII","BNLI","BOAT","BOBA",
+    "BOGA","BOLA","BOLT","BOSS","BPFI","BPII","BPTR","BRAM","BREN","BRIS",
+    "BRMS","BRNA","BRPT","BRRC","BSBK","BSDE","BSIM","BSML","BSSR","BSWD",
+    "BTEK","BTEL","BTON","BTPN","BTPS","BUAH","BUDI","BUKA","BUKK","BULL",
+    "BUMI","BUVA","BVIC","BWPT","BYAN","CAKK","CAMP","CANI","CARE","CARS",
+    "CASA","CASH","CASS","CBDK","CBPE","CBRE","CBUT","CBMF","CCSI","CDIA",
+    "CEKA","CENT","CFIN","CGAS","CHEK","CHEM","CHIP","CINT","CITA","CITY",
+    "CLAY","CLEO","CLPI","CMNP","CMNT","CMPP","CMRY","CNKO","CNMA","CNTX",
+    "COAL","COCO","COIN","COWL","CPIN","CPRI","CPRO","CRAB","CRSN","CSAP",
+    "CSIS","CSMI","CSRA","CTBN","CTRA","CTTH","CUAN","CYBR","DAAZ","DADA",
+    "DART","DATA","DAYA","DCII","DEAL","DEFI","DEPO","DEWA","DEWI","DFAM",
+    "DGNS","DGWG","DGIK","DIGI","DILD","DIVA","DKFT","DKHH","DLTA","DMAS",
+    "DMMX","DMND","DNAR","DNET","DOID","DOOH","DOSS","DPNS","DPUM","DRMA",
+    "DSFI","DSNG","DSSA","DUCK","DUTI","DVLA","DWGL","DYAN","EAST","ECII",
+    "EDGE","EKAD","ELIT","ELPI","ELSA","ELTY","EMAS","EMDE","EMTK","ENAK",
+    "ENRG","ENVY","ENZO","EPAC","EPMT","ERAL","ERAA","ERTX","ESIP","ESSA",
+    "ESTA","ESTI","ETWA","EURO","EXCL","FAPA","FAST","FASW","FILM","FIMP",
+    "FIRE","FISH","FITT","FLMC","FOLK","FOOD","FORE","FORU","FPNI","FUJI",
+    "FUTR","FWCT","GAMA","GDST","GDYR","GEMA","GEMS","GGRP","GGRM","GHON",
+    "GIAA","GJTL","GLOB","GLVA","GMFI","GMTD","GOLF","GOLD","GOLL","GOOD",
+    "GOTO","GPRA","GPSO","GRIA","GRPH","GRPM","GRII","GSMF","GTBO","GTRA",
+    "GTSI","GULA","GUNA","GWSA","GZCO","HADE","HAIS","HAJJ","HALO","HATM",
+    "HBAT","HDFA","HDIT","HEAL","HELI","HERO","HEXA","HGII","HILL","HITS",
+    "HKMU","HMSP","HOKI","HOME","HOMI","HOPE","HOTL","HRME","HRTA","HRUM",
+    "HUMI","HYGN","IATA","IBFN","IBOS","IBST","ICBP","ICON","IDEA","IDPR",
+    "IFII","IFSH","IGAR","IIKP","IKAI","IKAN","IKBI","IKPM","IMAS","IMJS",
+    "IMPC","INAF","INAI","INCF","INCI","INCO","INDF","INDO","INDR","INDS",
+    "INDX","INDY","INET","INKP","INOV","INPC","INPP","INPS","INRU","INTA",
+    "INTD","INTP","IOTF","IPAC","IPCC","IPCM","IPOL","IPPE","IPTV","IRRA",
+    "IRSX","ISAP","ISAT","ISEA","ISSP","ITIC","ITMA","ITMG","JAAS","JARR",
+    "JAST","JATI","JAVA","JAYA","JECC","JGLE","JIHD","JKON","JMAS","JPFA",
+    "JRPT","JSKY","JSMR","JSPT","JTPE","KAEF","KAQI","KARW","KARY","KAST",
+    "KAYU","KBAG","KBLI","KBLM","KBLV","KBRI","KDSI","KDTN","KEEN","KEJU",
+    "KETR","KIAS","KICI","KIJA","KING","KINO","KIOS","KJEN","KKES","KKGI",
+    "KLAS","KLBF","KLIN","KMDS","KMTR","KOBX","KOCI","KOIN","KOKA","KONI",
+    "KOPI","KOTA","KPIG","KRAH","KRAS","KREN","KSIX","KUAS","LABA","LABS",
+    "LAJU","LAND","LAPD","LCGP","LCKM","LEAD","LFLO","LIFE","LINK","LION",
+    "LIVE","LMAS","LMPI","LMSH","LOPI","LPCK","LPGI","LPIN","LPKR","LPLI",
+    "LPPF","LPPS","LRNA","LSIP","LTLS","LUCK","LUCY","MAAS","MABA","MADA",
+    "MAGP","MAHA","MAIN","MANG","MAPA","MAPB","MAPI","MARI","MARK","MASA",
+    "MASB","MAYA","MBAP","MBMA","MBSS","MBTO","MCAS","MCOL","MCOR","MDIA",
+    "MDKA","MDKI","MDLA","MDLN","MDRN","MEDC","MEDS","MEGA","MEJA","MENN",
+    "MERI","MERK","META","MFMI","MGNA","MGRO","MHKI","MICE","MIDI","MIKA",
+    "MINA","MINE","MIRA","MITI","MKAP","MKPI","MKTR","MLBI","MLIA","MLPL",
+    "MLPT","MMLP","MMIX","MNCN","MOLI","MORA","MPOW","MPMX","MPPA","MPRO",
+    "MPXL","MRAT","MREI","MSIE","MSIN","MSJA","MSKY","MSTI","MTDL","MTEL",
+    "MTFN","MTLA","MTMH","MTPS","MTRA","MTRN","MTSM","MTWI","MUTU","MYOH",
+    "MYOR","MYTX","NAIK","NANO","NASA","NASI","NATO","NAYZ","NCKL","NELY",
+    "NEST","NETV","NICE","NICK","NICL","NIKL","NINE","NIRO","NISP","NOBU",
+    "NPGF","NRCA","NSSS","NTBK","NUSA","NZIA","OASA","OBAT","OBMD","OCAP",
+    "OILS","OKAS","OLIV","OMED","OMRE","OPMS","PACK","PADA","PADI","PALM",
+    "PAMG","PANI","PANR","PANS","PART","PBID","PBSA","PBRX","PCAR","PDES",
+    "PDPP","PEGE","PEHA","PELI","PENT","PERW","PEVE","PGAS","PGEO","PGJO",
+    "PGLI","PGUN","PICO","PIPA","PJAA","PJHB","PKPK","PLAN","PLAS","PLIN",
+    "PMJS","PMMP","PMUI","PNBN","PNBS","PNGO","PNIN","PNLF","PNSE","POLA",
+    "POLI","POLL","POLU","POLY","POOL","PORT","POSA","POWR","PPGL","PPRI",
+    "PPRE","PPRO","PRAY","PRDA","PRIM","PSAB","PSAT","PSDN","PSGO","PSKT",
+    "PSSI","PTBA","PTDU","PTIS","PTMP","PTMR","PTPP","PTPS","PTPW","PTRO",
+    "PTSN","PTSP","PUDP","PURA","PURE","PURI","PWON","PYFA","PZZA","RAAM",
+    "RAFI","RAJA","RALS","RANC","RATU","RBMS","RCCC","RDTX","REAL","RELF",
+    "RELI","REPP","RGAS","RICY","RIGS","RIMO","RISE","RLCO","RMBA","RMKE",
+    "RMKO","RMLP","ROCK","RODA","ROLI","RONY","ROTI","RSCH","RSGK","RUIS",
+    "RUNS","SAFE","SAGE","SAGI","SAME","SAMF","SAMR","SAMP","SANO","SAPX",
+    "SATU","SBAT","SBMA","SCCO","SCMA","SCNP","SCPI","SDMU","SDPC","SDRA",
+    "SEMA","SFAN","SGER","SGGH","SGJL","SGRO","SHID","SHIP","SICO","SIDO",
+    "SIER","SILO","SIMA","SIMP","SINI","SIPD","SKBM","SKLT","SKRN","SKYB",
+    "SLIS","SMAR","SMDM","SMDR","SMGA","SMGR","SMKM","SMKL","SMLE","SMMA",
+    "SMMT","SMRA","SMRU","SMSM","SNLK","SOCI","SOFA","SOHO","SOLA","SONA",
+    "SOSS","SOTS","SOUL","SPMA","SPRE","SPTO","SQMI","SRAJ","SREI","SRIL",
+    "SRSN","SRTG","SSIA","SSMS","SSTM","STAA","STAR","STRK","STTP","SUGI",
+    "SULI","SUNI","SUPA","SUPR","SURE","SWAT","SWID","SYAI","TALF","TAMA",
+    "TAMU","TAPG","TARA","TAXI","TAYS","TBIG","TBLA","TBMS","TCID","TCPI",
+    "TDPM","TEBE","TECH","TELE","TFAS","TFCO","TGKA","TGRA","TGUK","TIFA",
+    "TINS","TIRA","TIRT","TKIM","TLDN","TLKM","TMAS","TMPO","TNCA","TOBA",
+    "TOOL","TOPS","TOSK","TOTL","TOTO","TOWR","TOYS","TPAI","TPIA","TPMA",
+    "TRAM","TRGU","TRIL","TRIM","TRIN","TRIO","TRIS","TRJA","TRON","TRST",
+    "TRUE","TRUK","TRUS","TSPC","TUGU","TULT","TYRE","UANG","UCID","UDNG",
+    "UFOE","ULTJ","UNIC","UNIQ","UNIT","UNSP","UNTR","UNVR","URBN","UVCR",
+    "VAST","VATE","VCOK","VERN","VICI","VICO","VINS","VISA","VISI","VIVA",
+    "VKTR","VOKS","VOSS","VRNA","VTNY","WAPO","WBSA","WEGE","WEHA","WGSH",
+    "WICO","WIDI","WIFI","WIIM","WIKA","WINE","WINR","WINS","WIRG","WITA",
+    "WMPP","WMUU","WOMF","WONS","WOOD","WOWS","WPOW","WSBP","WSKT","WTON",
+    "YELO","YOII","YPAS","YULE","YUPI","ZATA","ZBRA","ZENI","ZINC","ZONE","ZYRX",
 ]
 seen = set(); raw_stocks = [x for x in raw_stocks if not (x in seen or seen.add(x))]
 stocks_yf  = [s + ".JK" for s in raw_stocks]
@@ -396,92 +358,25 @@ stock_map  = {s + ".JK": s for s in raw_stocks}
 #  MARKET REGIME
 # ════════════════════════════════════════════════════
 @st.cache_data(ttl=600)
-@st.cache_data(ttl=120)   # 2 menit — real-time intraday
 def get_market_regime():
-    """
-    FIXED: Pakai harga REAL-TIME IHSG (intraday), bukan harga kemarin close.
-    Root cause lama: interval="1d" → close[-1] = harga KEMARIN
-    → market naik 1% intraday tapi regime masih RED karena baca data lama.
-
-    Fix:
-    - EMA20/EMA55 dari daily historis (butuh 55 hari data)
-    - Harga CURRENT dari 1m/5m intraday → real-time
-    - chg% = harga sekarang vs kemarin close
-    """
     try:
-        # ── Step 1: EMA dari daily historis ──
-        df_daily = yf.download("^JKSE", period="90d", interval="1d",
-                               progress=False, auto_adjust=True, timeout=10)
-        if df_daily is None or len(df_daily) < 20:
-            return ("UNKNOWN", 0, 0, 0, "Data IHSG kurang", 0.0)
-        if isinstance(df_daily.columns, pd.MultiIndex):
-            df_daily.columns = df_daily.columns.droplevel(-1)
-        close_hist = df_daily["Close"]
-        if isinstance(close_hist, pd.DataFrame):
-            close_hist = close_hist.iloc[:, 0]
-        close_hist = close_hist.dropna()
-        if len(close_hist) < 20:
-            return ("UNKNOWN", 0, 0, 0, "Data historis kurang", 0.0)
-
-        ema20      = float(close_hist.ewm(span=20, adjust=False).mean().iloc[-1])
-        ema55      = float(close_hist.ewm(span=min(55, len(close_hist)-1), adjust=False).mean().iloc[-1])
-        prev_close = float(close_hist.iloc[-1])   # kemarin close
-
-        # ── Step 2: Harga REAL-TIME via intraday ──
-        # 1m dulu, fallback 5m, fallback 15m
-        price = None; chg = 0.0
-        for tf, per in [("1m","1d"), ("5m","1d"), ("15m","2d")]:
-            try:
-                df_rt = yf.download("^JKSE", period=per, interval=tf,
-                                    progress=False, auto_adjust=True, timeout=8)
-                if df_rt is not None and not df_rt.empty and len(df_rt) >= 1:
-                    if isinstance(df_rt.columns, pd.MultiIndex):
-                        df_rt.columns = df_rt.columns.droplevel(-1)
-                    rt_c = df_rt["Close"]
-                    if isinstance(rt_c, pd.DataFrame): rt_c = rt_c.iloc[:, 0]
-                    rt_c = rt_c.dropna()
-                    if len(rt_c) >= 1:
-                        price = float(rt_c.iloc[-1])
-                        chg   = (price - prev_close) / max(prev_close, 1) * 100
-                        break
-            except: continue
-
-        # Fallback ke daily
-        if price is None:
-            price = prev_close
-            chg   = float(((close_hist.iloc[-1] - close_hist.iloc[-2]) / close_hist.iloc[-2]) * 100)
-
-        # ── Step 3: Regime logic ──
-        band            = 0.015   # ±1.5%
-        pct_vs_e20      = (price - ema20) / ema20 * 100
-        above_e20_clear = price > ema20 * (1 + band)
-        above_e20_any   = price > ema20 * (1 - band)
-        above_e55       = price > ema55
-        recovering      = chg > 0.5
-        bearish_confirm = chg < -0.5 and not above_e20_any
-
-        if above_e20_clear and above_e55:
-            regime = "GREEN"
-            detail = f"IHSG {price:,.0f} > EMA20 & EMA55 ✅ ({pct_vs_e20:+.1f}%, hari ini {chg:+.2f}%)"
-        elif above_e20_any and above_e55:
-            regime = "GREEN"
-            detail = f"IHSG {price:,.0f} dekat EMA20({ema20:,.0f}) & > EMA55 → Bullish ({chg:+.2f}%)"
-        elif above_e20_any and not above_e55:
-            regime = "SIDEWAYS"
-            detail = f"IHSG {price:,.0f} > EMA20 tapi < EMA55({ema55:,.0f}) ({chg:+.2f}%)"
-        elif not above_e20_any and recovering:
-            regime = "SIDEWAYS"
-            detail = f"IHSG {price:,.0f} recovery {chg:+.2f}% (EMA20={ema20:,.0f}, gap {pct_vs_e20:+.1f}%)"
-        elif bearish_confirm:
-            regime = "RED"
-            detail = f"IHSG {price:,.0f} < EMA20 {pct_vs_e20:+.1f}% + turun {chg:.2f}% → Bearish"
+        df = yf.download("^JKSE", period="60d", interval="1d",
+                         progress=False, auto_adjust=True, timeout=8)
+        if df is None or len(df) < 10:
+            return ("UNKNOWN", 0, 0, 0, "Data kurang", 0.0)
+        close = df["Close"].squeeze()
+        ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+        ema55 = float(close.ewm(span=min(55, len(close)-1), adjust=False).mean().iloc[-1])
+        price = float(close.iloc[-1])
+        chg   = float(((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) * 100)
+        if price < ema20:
+            return ("RED",      price, ema20, ema55, f"IHSG {price:,.0f} < EMA20 → Bearish", chg)
+        elif price > ema20 and price > ema55:
+            return ("GREEN",    price, ema20, ema55, f"IHSG {price:,.0f} > EMA20 & EMA55 → Bullish", chg)
         else:
-            regime = "SIDEWAYS"
-            detail = f"IHSG {price:,.0f} konsolidasi (EMA20={ema20:,.0f}, {pct_vs_e20:+.1f}%)"
-
-        return (regime, price, ema20, ema55, detail, chg)
-    except Exception as e:
-        return ("UNKNOWN", 0, 0, 0, f"IHSG error: {str(e)[:40]}", 0.0)
+            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} antara EMA20-EMA55", chg)
+    except:
+        return ("UNKNOWN", 0, 0, 0, "IHSG tidak tersedia", 0.0)
 
 def get_regime_config(regime):
     return {
@@ -792,7 +687,7 @@ def fetch_intraday(tickers, interval="15m", force_fresh=False):
         df = fetch_ds_ohlcv(raw_t, interval, 200, True)
         return t, df
 
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    with ThreadPoolExecutor(max_workers=20) as ex:
         futs = {ex.submit(_fetch_one, t): t for t in need_fetch}
         for f in as_completed(futs):
             try:
@@ -839,17 +734,14 @@ def send_telegram(results_top, source="Scanner"):
            f"⏰ `{now.strftime('%H:%M:%S')} WIB` · `{now.strftime('%d %b %Y')}`\n{sep}\n")
     body = ""
     for r in results_top[:5]:
-        sig    = r.get('Signal', '-')
-        ticker = r.get('Ticker', r.get('Pair', r.get('Coin', '?')))
-        price  = r.get('Price', 0)
-        tp_v   = r.get('TP', 0); sl_v = r.get('SL', 0)
-        em     = "💎" if ("BAGGER" in sig or "KANDIDAT" in sig) else ("🏆" if ("GACOR" in sig or "REVERSAL" in sig) else ("🔥" if "POTENSIAL" in sig else "👀"))
-        te     = "📈" if "▲" in r.get('Trend','') else ("📉" if "▼" in r.get('Trend','') else "➡️")
-        body  += (f"\n{em} *{ticker}*  `{sig}`\n"
-                  f"   💰 Price: `{price:,}` {te}\n"
-                  f"   📈 RSI: `{r.get('RSI-EMA', r.get('RSI_EMA', 0))}` | RVOL: `{r.get('RVOL',0)}x`\n"
-                  f"   🎯 TP: `{tp_v:,}` | 🛑 SL: `{sl_v:,}`\n"
-                  f"   💡 _{r.get('Reasons','')[:60]}_\n")
+        sig  = r.get('Signal','-')
+        em   = "🏆" if ("GACOR" in sig or "REVERSAL" in sig) else ("🔥" if "POTENSIAL" in sig else "👀")
+        te   = "📈" if "▲" in r.get('Trend','') else ("📉" if "▼" in r.get('Trend','') else "➡️")
+        body += (f"\n{em} *{r['Ticker']}*  `{sig}`\n"
+                 f"   💰 Price: `{r['Price']:,}` {te}\n"
+                 f"   📈 RSI-EMA: `{r.get('RSI-EMA',0)}` | RVOL: `{r.get('RVOL',0)}x`\n"
+                 f"   🎯 TP: `{r['TP']:,}` | 🛑 SL: `{r['SL']:,}`\n"
+                 f"   💡 _{r.get('Reasons','')[:60]}_\n")
     footer = f"\n{sep}\n⚡ _Theta Turbo v5 · 15M_\n⚠️ _BUKAN saran investasi!_"
     try:
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
@@ -1020,17 +912,6 @@ tab_scanner, tab_watchlist, tab_bsjp, tab_sector, tab_gapup, tab_trail, tab_back
 #  TAB 1: SCANNER
 # ════════════════════════════════════════════════════
 with tab_scanner:
-    # ── Pre-update scan_mode dari regime SEBELUM expander ──
-    # Fixes: saat auto_trigger fire (page reload), expander collapsed
-    # → widget tidak execute → scan_mode dari session_state
-    _auto_reg_now = st.session_state.get("auto_reg", True)
-    if _auto_reg_now:
-        st.session_state.ss_scan_mode    = rcfg["mode"]
-        st.session_state.ss_auto_thresh  = st.session_state.get("auto_thr", True)
-        if st.session_state.get("auto_thr", True):
-            st.session_state.ss_min_score  = rcfg["min_score"]
-            st.session_state.ss_vol_thresh = rcfg["min_rvol"]
-
     with st.expander("⚙️  Scanner Settings", expanded=False):
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
@@ -1040,12 +921,9 @@ with tab_scanner:
                 scan_mode = rcfg["mode"]
                 st.markdown(f'<div style="font-family:Space Mono,monospace;font-size:10px;padding:6px 10px;background:rgba(0,0,0,.3);border-radius:4px;color:{rcolor};">Auto: {scan_mode}</div>', unsafe_allow_html=True)
             else:
-                _sm_opts = ["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"]
-                _sm_prev = st.session_state.get("ss_scan_mode","Scalping ⚡")
-                _sm_idx  = _sm_opts.index(_sm_prev) if _sm_prev in _sm_opts else 0
-                scan_mode = st.radio("Mode", _sm_opts, index=_sm_idx, label_visibility="collapsed", key="scan_mode_radio")
-            # Persist ke session_state
-            st.session_state.ss_scan_mode = scan_mode
+                scan_mode = st.radio("Mode", ["Scalping ⚡","Momentum 🚀","Reversal 🎯"], label_visibility="collapsed", key="scan_mode_radio")
+            tele_on = st.toggle("📡 Telegram Alert", value=True, key="tele_on")
+        with sc2:
             st.markdown('<div class="settings-label">FILTER</div>', unsafe_allow_html=True)
             auto_thresh = st.toggle("🤖 Auto-Threshold", value=True, key="auto_thr")
             if auto_thresh:
@@ -1054,11 +932,7 @@ with tab_scanner:
             else:
                 min_score  = st.slider("Min Score (0-6)", 0, 6, 4, key="msc")
                 vol_thresh = st.slider("Min RVOL Spike", 1.0, 5.0, 1.5, 0.1, key="vol")
-            # Persist
-            st.session_state.ss_min_score  = min_score
-            st.session_state.ss_vol_thresh = vol_thresh
             min_turn = st.number_input("Min Turnover (M Rp)", value=500, step=100, key="trn") * 1_000_000
-            st.session_state.ss_min_turn   = min_turn
         with sc3:
             st.markdown('<div class="settings-label">TAMPILAN</div>', unsafe_allow_html=True)
             view_mode  = st.radio("View", ["Card View 🃏","Table View 📊"], label_visibility="collapsed", key="view_mode")
@@ -1075,21 +949,10 @@ with tab_scanner:
     auto_trigger = False
     if st.session_state.last_scan_time and not do_scan_btn:
         _elapsed = _now_check - st.session_state.last_scan_time
-        if _elapsed >= 480 and st.session_state.scan_results and is_open:
+        if _elapsed >= 300 and st.session_state.scan_results and is_open:
             auto_trigger = True
 
     if do_scan_btn or auto_trigger:
-        # Saat auto_trigger: baca dari session_state
-        if auto_trigger:
-            scan_mode  = st.session_state.get("ss_scan_mode",  rcfg["mode"])
-            min_score  = st.session_state.get("ss_min_score",  rcfg["min_score"])
-            vol_thresh = st.session_state.get("ss_vol_thresh", rcfg["min_rvol"])
-            min_turn   = st.session_state.get("ss_min_turn",   500_000_000)
-        # Bagger 💎 → Daily TF; lainnya → 15m intraday
-        _is_bagger_scan = (scan_mode == "Bagger 💎")
-        _scan_tf        = "1d"  if _is_bagger_scan else "15m"
-        _scan_period    = "60d" if _is_bagger_scan else "5d"
-        _min_bars       = 20    if _is_bagger_scan else 55
         scan_list = stocks_yf[:200] if quick_mode else stocks_yf
         n_scan    = len(scan_list)
         prog_ph   = st.empty()
@@ -1126,14 +989,11 @@ with tab_scanner:
             # Parallel fetch 10 threads (thread-safe karena disk cache)
             def _f(t):
                 raw_t = t.replace(".JK","").upper()
-                # Bagger 💎: DS tidak support daily → langsung skip ke yFinance
-                if DS_KEY and not _is_bagger_scan:
-                    df = fetch_ds_ohlcv(raw_t, "15m", 200, True)
-                    if df is not None: return t, df
-                return t, None
+                df = fetch_ds_ohlcv(raw_t, "15m", 200, True)
+                return t, df
 
             done_count = [0]
-            with ThreadPoolExecutor(max_workers=10) as ex:
+            with ThreadPoolExecutor(max_workers=20) as ex:
                 futs = {ex.submit(_f, t): t for t in need_fetch}
                 for fut in as_completed(futs):
                     try:
@@ -1153,30 +1013,6 @@ with tab_scanner:
 
             st.session_state.data_dict = data_dict
 
-            # ── Fetch daily data untuk GAIN + VAL yang akurat ──
-            prog_ph.markdown(
-                f'<div style="color:#00e5ff;font-family:Space Mono,monospace;font-size:11px;">'
-                f'📅 Fetching daily context untuk Gain & Val...</div>',
-                unsafe_allow_html=True)
-            daily_dict = {}
-            need_daily = [t for t in ticker_list]
-            def _fd(t):
-                raw_t = t.replace(".JK","").upper()
-                # Try cache first
-                cached = _cache_get(raw_t, "daily")
-                if cached is not None: return t, cached
-                df = fetch_ds_ohlcv(raw_t, "daily", 100, False)
-                return t, df
-            with ThreadPoolExecutor(max_workers=10) as ex:
-                futs = {ex.submit(_fd, t): t for t in need_daily}
-                for f in as_completed(futs):
-                    try:
-                        t, df = f.result(timeout=15)
-                        if df is not None and len(df) >= 2:
-                            daily_dict[t] = df
-                    except: pass
-            st.session_state.daily_dict = daily_dict
-
             # ── PHASE 2: Process ──
             pb.progress(0.85)
             prog_ph.markdown(
@@ -1185,48 +1021,17 @@ with tab_scanner:
                 unsafe_allow_html=True)
 
             results = []; tickers = list(data_dict.keys())
-            # Fetch daily data dict untuk gain + val yang akurat
-            daily_dict = st.session_state.get("daily_dict", {})
 
             for i, ticker_yf in enumerate(tickers):
                 pb.progress(0.85 + (i+1)/max(len(tickers),1)*0.14)
                 try:
                     df = data_dict[ticker_yf].copy()
-                    if len(df) < _min_bars: continue
+                    if len(df)<55: continue
                     df = apply_intraday_indicators(df)
                     r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3] if len(df)>=3 else p
                     close=float(r['Close']); vol=float(r['Volume'])
-
-                    # FIX GAIN: pakai daily D1 kalau ada, bukan 15m ROC
-                    ticker_raw = ticker_yf.replace(".JK","").upper()
-                    df_d = daily_dict.get(ticker_yf) or daily_dict.get(ticker_raw)
-                    if df_d is not None and len(df_d) >= 2:
-                        c1 = float(df_d.iloc[-1]['Close'])
-                        c0 = float(df_d.iloc[-2]['Close'])
-                        gain_pct = (c1 - c0) / max(c0, 1) * 100
-                        # FIX VAL: pakai volume harian
-                        daily_vol = float(df_d.iloc[-1]['Volume'])
-                        turnover = c1 * daily_vol
-                    else:
-                        # Fallback: sum volume 15m hari ini
-                        try:
-                            today = df.index[-1].date()
-                            df_today = df[df.index.date == today]
-                            turnover = close * df_today['Volume'].sum()
-                            gain_pct = float(r.get('ROC3', 0)) * 100
-                        except:
-                            turnover = close * vol
-                            gain_pct = float(r.get('ROC3', 0)) * 100
-
-                    rvol=float(r['RVOL'])
-                    # Bagger daily: vol harian biasanya lebih besar
-                    # Pakai turnover dari bar terakhir daily
-                    if _is_bagger_scan:
-                        # Daily volume = langsung dari bar
-                        daily_turn = float(r['Close']) * float(r['Volume'])
-                        if daily_turn < min_turn * 0.1 or rvol < 0.3: continue
-                    else:
-                        if turnover < min_turn or rvol < vol_thresh: continue
+                    turnover=close*vol; rvol=float(r['RVOL'])
+                    if turnover<min_turn or rvol<vol_thresh: continue
 
                     sig,sc_v2,flags_v2,gc_now = get_sinyal_v2(r,p,p2)
                     aksi_v2 = get_aksi_v2(sig, gc_now, sc_v2)
@@ -1241,38 +1046,28 @@ with tab_scanner:
                     e9=float(r['EMA9']); e21=float(r['EMA21']); e50=float(r['EMA50'])
                     trend = "▲ UP" if e9>e21>e50 else("▼ DOWN" if e9<e21<e50 else"◆ SIDE")
 
-                    # FIX ASING: cek FBuy+FSell > 0, bukan threshold 100jt
+                    # Bandarmologi
                     def _sf(v,d=0.):
                         try: x=float(v); return d if(np.isnan(x) or np.isinf(x)) else x
                         except: return d
                     fnet3=_sf(r.get('FNet3',0)); fnet8=_sf(r.get('FNet8',0))
                     fratio=_sf(r.get('FRatio',0.5))
-                    fbuy=_sf(r.get('FBuy',0)); fsell=_sf(r.get('FSell',0))
-                    has_asing = (fbuy + fsell) > 0
-                    if not has_asing:          fdir="—";        fc_="#4a5568"
-                    elif fnet3>0 and fnet8>0:  fdir="🔵 BELI";  fc_="#4da6ff"
-                    elif fnet3<0 and fnet8<0:  fdir="🔴 JUAL";  fc_="#ff3d5a"
-                    else:                      fdir="⚪ MIX";   fc_="#888888"
+                    if fnet3>0 and fnet8>0:   fdir="🔵 BELI"
+                    elif fnet3<0 and fnet8<0: fdir="🔴 JUAL"
+                    else:                     fdir="⚪ MIX"
                     lwick=_sf(r.get('LWick',0))
 
-                    # Val display dari daily turnover
-                    vb = turnover / 1e9
-                    val_str = f"{vb:.1f}B" if vb >= 1 else f"{round(vb*1000,0):.0f}M"
-
                     results.append({
-                        "Ticker":stock_map.get(ticker_yf, ticker_raw),"Price":int(close),"Score":sc,
+                        "Ticker":stock_map[ticker_yf],"Price":int(close),"Score":sc,
                         "Signal":sig,"Sinyal_v2":sig,"Aksi_v2":aksi_v2,
                         "Trend":trend,"RSI-EMA":round(float(r['RSI_EMA']),1),
                         "Stoch K":round(float(r['STOCH_K']),1),"Stoch D":round(float(r['STOCH_D']),1),
                         "MACD Hist":round(float(r['MACD_Hist']),4),"RVOL":round(rvol,2),
-                        "BB%":round(float(r['BB_pct']),2),"ROC 3B%":round(gain_pct,2),
-                        "Gain":round(gain_pct,1),
+                        "BB%":round(float(r['BB_pct']),2),"ROC 3B%":round(float(r['ROC3'])*100,2),
                         "VWAP":int(float(r['VWAP'])),"TP":int(tp),"SL":int(sl),"R:R":round(rr,1),
-                        "Turnover(M)":round(turnover/1e6,1),"Val":val_str,
-                        "Reasons":" · ".join(reasons),
+                        "Turnover(M)":round(turnover/1e6,1),"Reasons":" · ".join(reasons),
                         "_class":get_card_class(sig),"LWick":round(lwick,1),
-                        "FDir":fdir,"FC":fc_,
-                        "FNet3":int(fnet3),"FNet8":int(fnet8),"FRatio":round(fratio,2),
+                        "FDir":fdir,"FNet3":int(fnet3),"FNet8":int(fnet8),"FRatio":round(fratio,2),
                         "sc_v2":sc_v2,"gc_now":gc_now,
                     })
                 except: continue
@@ -1281,7 +1076,6 @@ with tab_scanner:
             prog_ph.empty(); pb.empty()
             st.session_state.scan_results = results
             st.session_state.last_scan_time = now_jkt.timestamp()
-            _tt_save(results, st.session_state.last_scan_time)  # persist ke disk
             st.session_state.last_scan_mode = scan_mode
 
             if tele_on and results:
@@ -1412,7 +1206,7 @@ with tab_scanner:
                 bars=''.join([f'<div class="sc-bar {"filled" if i<sc_int else "empty"}" style="width:28px"></div>' for i in range(6)])
                 roc_c='#00ff88' if row['ROC 3B%']>0 else'#ff3d5a'
                 te="📈" if "▲" in row['Trend'] else("📉" if "▼" in row['Trend'] else"➡️")
-                fd=row.get("FDir","—"); fc=row.get("FC","#4a5568")
+                fd=row.get("FDir","⚪"); fc="#4da6ff" if "BELI" in fd else "#ff3d5a" if "JUAL" in fd else "#4a5568"
                 card_html+=f"""<div class="signal-card {row['_class']}">
                   <div style="display:flex;justify-content:space-between;align-items:flex-start;">
                     <div><div class="sc-ticker">{row['Ticker']}</div>
@@ -1449,7 +1243,7 @@ with tab_scanner:
             rsi_s="UP" if rsi_v>60 else("DEAD" if rsi_v<35 else("DOWN" if rsi_v<45 else "NEU"))
             rsi_c="#00ff88" if rsi_v>60 else"#ff3d5a" if rsi_v<35 else"#ff7b00" if rsi_v<45 else"#4a5568"
             rvol_v=row.get("RVOL",1); rvol_s=f"{rvol_v*100:.0f}%" if rvol_v<10 else f"{rvol_v:.1f}x"
-            fd=row.get("FDir","—"); fc=row.get("FC","#4a5568")
+            fd=row.get("FDir","⚪"); fc="#4da6ff" if "BELI" in fd else"#ff3d5a" if "JUAL" in fd else"#4a5568"
             sinyal_v2=row.get("Sinyal_v2",row.get("Signal","-"))
             aksi_v2=row.get("Aksi_v2","-")
             tp_v=row.get("TP",0); sl_v=row.get("SL",0); price=row.get("Price",0)
@@ -1498,7 +1292,7 @@ with tab_watchlist:
         st.caption(f"Regime suggest: {rcfg['mode']}")
     with wc3:
         st.markdown("<br>", unsafe_allow_html=True)
-        # Fresh data toggle removed — DS cache TTL handle ini
+        wl_force = st.toggle("🔄 Fresh", value=False, key="wl_fresh")
         wl_run   = st.button("🔍 Analisa", use_container_width=True, key="wl_run")
         wl_tele  = st.button("📡 Kirim Telegram", use_container_width=True, key="wl_tele")
 
@@ -1513,7 +1307,7 @@ with tab_watchlist:
                 df = None
                 try:
                     if DS_KEY:
-                        df = fetch_ds_ohlcv(t, "15m", 200, False)
+                        df = fetch_ds_ohlcv(t, "15m", 200, wl_force)
                     if df is None:
                         raw = yf.download(t+".JK", period="5d", interval="15m",
                                           progress=False, auto_adjust=True, threads=False)
@@ -1935,17 +1729,16 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 # JS timer → reload browser otomatis, tidak butuh interaksi user
-# st.rerun() DIHAPUS → bikin infinite loop di Streamlit Cloud!
-# KUNCI: hanya inject timer kalau BELUM waktunya reload (elapsed < 480)
-# Kalau elapsed >= 480 → auto_trigger sudah handle rescan, jangan loop!
 if is_open_now and st.session_state.scan_results and st.session_state.last_scan_time:
-    if elapsed_s < 480:  # hanya kalau belum waktunya
-        _rem_ms = max(10000, int(_rem2 * 1000))  # min 10 detik
-        _components.html(
-            f"""<script>
-            if(window._tt_timer) clearTimeout(window._tt_timer);
-            window._tt_timer = setTimeout(function(){{
-                window.parent.location.reload();
-            }}, {_rem_ms});
-            </script>""",
-            height=0)
+    _rem_ms = max(0, int(_rem2 * 1000))
+    _components.html(
+        f"""<script>
+        if(window._tt_timer) clearTimeout(window._tt_timer);
+        window._tt_timer = setTimeout(function(){{
+            window.parent.location.reload();
+        }}, {_rem_ms});
+        </script>""",
+        height=0)
+    # Juga langsung rerun kalau sudah lewat
+    if elapsed_s >= 480:
+        st.rerun()
