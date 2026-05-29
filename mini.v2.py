@@ -396,25 +396,92 @@ stock_map  = {s + ".JK": s for s in raw_stocks}
 #  MARKET REGIME
 # ════════════════════════════════════════════════════
 @st.cache_data(ttl=600)
+@st.cache_data(ttl=120)   # 2 menit — real-time intraday
 def get_market_regime():
+    """
+    FIXED: Pakai harga REAL-TIME IHSG (intraday), bukan harga kemarin close.
+    Root cause lama: interval="1d" → close[-1] = harga KEMARIN
+    → market naik 1% intraday tapi regime masih RED karena baca data lama.
+
+    Fix:
+    - EMA20/EMA55 dari daily historis (butuh 55 hari data)
+    - Harga CURRENT dari 1m/5m intraday → real-time
+    - chg% = harga sekarang vs kemarin close
+    """
     try:
-        df = yf.download("^JKSE", period="60d", interval="1d",
-                         progress=False, auto_adjust=True, timeout=8)
-        if df is None or len(df) < 10:
-            return ("UNKNOWN", 0, 0, 0, "Data kurang", 0.0)
-        close = df["Close"].squeeze()
-        ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
-        ema55 = float(close.ewm(span=min(55, len(close)-1), adjust=False).mean().iloc[-1])
-        price = float(close.iloc[-1])
-        chg   = float(((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) * 100)
-        if price < ema20:
-            return ("RED",      price, ema20, ema55, f"IHSG {price:,.0f} < EMA20 → Bearish", chg)
-        elif price > ema20 and price > ema55:
-            return ("GREEN",    price, ema20, ema55, f"IHSG {price:,.0f} > EMA20 & EMA55 → Bullish", chg)
+        # ── Step 1: EMA dari daily historis ──
+        df_daily = yf.download("^JKSE", period="90d", interval="1d",
+                               progress=False, auto_adjust=True, timeout=10)
+        if df_daily is None or len(df_daily) < 20:
+            return ("UNKNOWN", 0, 0, 0, "Data IHSG kurang", 0.0)
+        if isinstance(df_daily.columns, pd.MultiIndex):
+            df_daily.columns = df_daily.columns.droplevel(-1)
+        close_hist = df_daily["Close"]
+        if isinstance(close_hist, pd.DataFrame):
+            close_hist = close_hist.iloc[:, 0]
+        close_hist = close_hist.dropna()
+        if len(close_hist) < 20:
+            return ("UNKNOWN", 0, 0, 0, "Data historis kurang", 0.0)
+
+        ema20      = float(close_hist.ewm(span=20, adjust=False).mean().iloc[-1])
+        ema55      = float(close_hist.ewm(span=min(55, len(close_hist)-1), adjust=False).mean().iloc[-1])
+        prev_close = float(close_hist.iloc[-1])   # kemarin close
+
+        # ── Step 2: Harga REAL-TIME via intraday ──
+        # 1m dulu, fallback 5m, fallback 15m
+        price = None; chg = 0.0
+        for tf, per in [("1m","1d"), ("5m","1d"), ("15m","2d")]:
+            try:
+                df_rt = yf.download("^JKSE", period=per, interval=tf,
+                                    progress=False, auto_adjust=True, timeout=8)
+                if df_rt is not None and not df_rt.empty and len(df_rt) >= 1:
+                    if isinstance(df_rt.columns, pd.MultiIndex):
+                        df_rt.columns = df_rt.columns.droplevel(-1)
+                    rt_c = df_rt["Close"]
+                    if isinstance(rt_c, pd.DataFrame): rt_c = rt_c.iloc[:, 0]
+                    rt_c = rt_c.dropna()
+                    if len(rt_c) >= 1:
+                        price = float(rt_c.iloc[-1])
+                        chg   = (price - prev_close) / max(prev_close, 1) * 100
+                        break
+            except: continue
+
+        # Fallback ke daily
+        if price is None:
+            price = prev_close
+            chg   = float(((close_hist.iloc[-1] - close_hist.iloc[-2]) / close_hist.iloc[-2]) * 100)
+
+        # ── Step 3: Regime logic ──
+        band            = 0.015   # ±1.5%
+        pct_vs_e20      = (price - ema20) / ema20 * 100
+        above_e20_clear = price > ema20 * (1 + band)
+        above_e20_any   = price > ema20 * (1 - band)
+        above_e55       = price > ema55
+        recovering      = chg > 0.5
+        bearish_confirm = chg < -0.5 and not above_e20_any
+
+        if above_e20_clear and above_e55:
+            regime = "GREEN"
+            detail = f"IHSG {price:,.0f} > EMA20 & EMA55 ✅ ({pct_vs_e20:+.1f}%, hari ini {chg:+.2f}%)"
+        elif above_e20_any and above_e55:
+            regime = "GREEN"
+            detail = f"IHSG {price:,.0f} dekat EMA20({ema20:,.0f}) & > EMA55 → Bullish ({chg:+.2f}%)"
+        elif above_e20_any and not above_e55:
+            regime = "SIDEWAYS"
+            detail = f"IHSG {price:,.0f} > EMA20 tapi < EMA55({ema55:,.0f}) ({chg:+.2f}%)"
+        elif not above_e20_any and recovering:
+            regime = "SIDEWAYS"
+            detail = f"IHSG {price:,.0f} recovery {chg:+.2f}% (EMA20={ema20:,.0f}, gap {pct_vs_e20:+.1f}%)"
+        elif bearish_confirm:
+            regime = "RED"
+            detail = f"IHSG {price:,.0f} < EMA20 {pct_vs_e20:+.1f}% + turun {chg:.2f}% → Bearish"
         else:
-            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} antara EMA20-EMA55", chg)
-    except:
-        return ("UNKNOWN", 0, 0, 0, "IHSG tidak tersedia", 0.0)
+            regime = "SIDEWAYS"
+            detail = f"IHSG {price:,.0f} konsolidasi (EMA20={ema20:,.0f}, {pct_vs_e20:+.1f}%)"
+
+        return (regime, price, ema20, ema55, detail, chg)
+    except Exception as e:
+        return ("UNKNOWN", 0, 0, 0, f"IHSG error: {str(e)[:40]}", 0.0)
 
 def get_regime_config(regime):
     return {
