@@ -1231,6 +1231,8 @@ with tab_scanner:
 
             st.session_state.data_dict = data_dict
 
+            st.session_state.data_dict = data_dict
+
             # ── Fetch daily data untuk GAIN + VAL yang akurat ──
             prog_ph.markdown(
                 f'<div style="color:#00e5ff;font-family:Space Mono,monospace;font-size:11px;">'
