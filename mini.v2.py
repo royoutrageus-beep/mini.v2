@@ -862,24 +862,48 @@ def send_telegram(results_top, source="Scanner"):
 #  Fixes MultiIndex structure yang berubah di versi 0.2.x+
 # ════════════════════════════════════════════════════
 def _yf_extract(raw, ticker, n_batch):
-    """Robust extraction dari yfinance multi-download — handles semua versi."""
+    """
+    Robust extraction dari yfinance — handles SEMUA versi:
+    - 0.2.x single: flat columns [Open,High,Low,Close,Volume]
+    - 0.2.x multi:  MultiIndex (Ticker, Price) atau (Price, Ticker)
+    - 1.4.x single: MultiIndex (Price, Ticker) even untuk 1 ticker
+    - 1.4.x multi:  MultiIndex (Price, Ticker)
+    """
     try:
         if raw is None or raw.empty: return None
+        _ohlcv = {'Open','High','Low','Close','Volume','Adj Close',
+                  'open','high','low','close','volume','adj close'}
         if n_batch == 1:
             df = raw.copy()
+            if isinstance(df.columns, pd.MultiIndex):
+                l0 = df.columns.get_level_values(0).unique().tolist()
+                l1 = df.columns.get_level_values(1).unique().tolist()
+                # (Price, Ticker) format → yfinance 1.4.x
+                if any(x in _ohlcv for x in l0):
+                    df = df.droplevel(1, axis=1)
+                # (Ticker, Price) format
+                elif any(x in _ohlcv for x in l1):
+                    df = df.droplevel(0, axis=1)
         else:
             if not isinstance(raw.columns, pd.MultiIndex): return None
-            l0 = list(raw.columns.get_level_values(0).unique())
-            l1 = list(raw.columns.get_level_values(1).unique())
-            if ticker in l0:   df = raw[ticker].copy()
-            elif ticker in l1: df = raw.xs(ticker, axis=1, level=1).copy()
-            else: return None
-        # Flatten remaining MultiIndex
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(-1)
-        # Normalize column names
+            l0 = raw.columns.get_level_values(0).unique().tolist()
+            l1 = raw.columns.get_level_values(1).unique().tolist()
+            # yfinance 0.2.x: (Ticker, Price)
+            if ticker in l0:
+                df = raw[ticker].copy()
+            # yfinance 1.4.x: (Price, Ticker)
+            elif ticker in l1:
+                df = raw.xs(ticker, axis=1, level=1).copy()
+            else:
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(-1)
+        # Normalize column names (lowercase → capitalize)
         rename = {c: c.capitalize() for c in df.columns if c.islower()}
         if rename: df = df.rename(columns=rename)
+        # Handle 'Adj Close' → rename to 'Close' kalau Close tidak ada
+        if 'Adj Close' in df.columns and 'Close' not in df.columns:
+            df = df.rename(columns={'Adj Close': 'Close'})
         required = ['Open','High','Low','Close','Volume']
         if any(c not in df.columns for c in required): return None
         df = df[required].dropna(subset=['Close'])
