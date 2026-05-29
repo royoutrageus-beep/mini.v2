@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import streamlit as st
 import time
+import random
 import requests
 import numpy as np
 import pytz
@@ -45,6 +46,45 @@ _YF_SESSION.headers.update({
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
 })
+
+# ════════════════════════════════════════════════════
+#  MULTI-SOURCE FETCH — bypass Yahoo rate limit
+# ════════════════════════════════════════════════════
+def _ticker_history(ticker_yf, period="5d", interval="15m"):
+    """yf.Ticker().history() — pakai chart API, endpoint berbeda dari download."""
+    try:
+        t = yf.Ticker(ticker_yf, session=_YF_SESSION)
+        df = t.history(period=period, interval=interval, auto_adjust=True)
+        if df is None or df.empty: return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(-1)
+        rename = {c:c.capitalize() for c in df.columns if c.islower()}
+        if rename: df = df.rename(columns=rename)
+        req = ["Open","High","Low","Close","Volume"]
+        if any(c not in df.columns for c in req): return None
+        df = df[req].dropna(subset=["Close"])
+        df = df[df["Volume"] > 0]
+        return df if len(df) >= 2 else None
+    except: return None
+
+def _stooq_fetch(ticker_raw, interval="1d"):
+    """Stooq.com — server beda dari Yahoo, gratis, no API key needed."""
+    import io
+    try:
+        sym = ticker_raw.lower().replace("^","").replace(".jk","") + ".jk"
+        iv_map = {"1d":"d","daily":"d","1h":"h","15m":"15","5m":"5"}
+        iv = iv_map.get(interval, "d")
+        r = _YF_SESSION.get(f"https://stooq.com/q/d/l/?s={sym}&i={iv}", timeout=10)
+        if r.status_code != 200 or len(r.text) < 50: return None
+        df = pd.read_csv(io.StringIO(r.text))
+        if df.empty or "Close" not in df.columns: return None
+        df.columns = [c.capitalize() for c in df.columns]
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.set_index("Date").sort_index()
+        df = df[["Open","High","Low","Close","Volume"]].dropna(subset=["Close"])
+        df = df[df["Volume"] > 0]
+        return df if len(df) >= 2 else None
+    except: return None
 
 # ════════════════════════════════════════════════════
 #  DISK CACHE — thread-safe, persistent antar session
@@ -1227,31 +1267,29 @@ with tab_scanner:
                     f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">' 
                     f'📊 yFinance fallback: {len(missing_yf)} ticker · {_scan_tf.upper()} · batch download...</div>',
                     unsafe_allow_html=True)
-                BATCH_SZ = 10; DELAY_OK = 3.0; DELAY_429 = 20.0
+                BATCH_SZ = 10; DELAY_OK = random.uniform(2.0, 5.0); DELAY_429 = random.uniform(15.0, 25.0)
                 for i_yf in range(0, len(missing_yf), BATCH_SZ):
-                    batch_yf = missing_yf[i_yf:i_yf + BATCH_SZ]
-                    for _attempt in range(3):
-                        try:
-                            raw_yf = yf.download(
-                                list(batch_yf),
-                                period=_scan_period, interval=_scan_tf,
-                                group_by='ticker', progress=False,
-                                threads=False, auto_adjust=True,
-                                session=_YF_SESSION)  # threads=False!
-                            for t_yf in batch_yf:
-                                try:
-                                    df_yf = _yf_extract(raw_yf, t_yf, len(batch_yf))
-                                    if df_yf is not None and len(df_yf) >= _min_bars:
-                                        data_dict[t_yf] = df_yf
-                                except: pass
-                            break
-                        except Exception as _e:
-                            if "rate" in str(_e).lower() or "429" in str(_e):
-                                time.sleep(DELAY_429); continue
-                            break
-                    pct = 0.50 + (i_yf + BATCH_SZ) / max(len(missing_yf), 1) * 0.25
-                    pb.progress(min(pct, 0.76))
-                    time.sleep(DELAY_OK)
+                    for t_yf in batch_yf:
+                        if t_yf in data_dict: continue
+                        _iv  = "1d"  if _is_bagger_scan else "15m"
+                        _per = "60d" if _is_bagger_scan else "5d"
+                        # Source A: Ticker.history() — chart API
+                        df_got = _ticker_history(t_yf, _per, _iv)
+                        # Source B: Stooq (daily/bagger)
+                        if df_got is None and _is_bagger_scan:
+                            try: df_got = _stooq_fetch(t_yf.replace(".JK",""),"1d")
+                            except: pass
+                        # Source C: yf.download fallback
+                        if df_got is None:
+                            try:
+                                _rw=yf.download(t_yf,period=_per,interval=_iv,
+                                    progress=False,auto_adjust=True,
+                                    threads=False,session=_YF_SESSION)
+                                df_got=_yf_extract(_rw,t_yf,1)
+                            except: pass
+                        if df_got is not None and len(df_got)>=_min_bars:
+                            data_dict[t_yf]=df_got
+                        time.sleep(random.uniform(1.0, 3.0))
                 prog_ph.markdown(
                     f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">' 
                     f'✅ yFinance: {len(data_dict)} saham siap</div>',
