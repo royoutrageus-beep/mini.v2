@@ -839,14 +839,17 @@ def send_telegram(results_top, source="Scanner"):
            f"⏰ `{now.strftime('%H:%M:%S')} WIB` · `{now.strftime('%d %b %Y')}`\n{sep}\n")
     body = ""
     for r in results_top[:5]:
-        sig  = r.get('Signal','-')
-        em   = "🏆" if ("GACOR" in sig or "REVERSAL" in sig) else ("🔥" if "POTENSIAL" in sig else "👀")
-        te   = "📈" if "▲" in r.get('Trend','') else ("📉" if "▼" in r.get('Trend','') else "➡️")
-        body += (f"\n{em} *{r['Ticker']}*  `{sig}`\n"
-                 f"   💰 Price: `{r['Price']:,}` {te}\n"
-                 f"   📈 RSI-EMA: `{r.get('RSI-EMA',0)}` | RVOL: `{r.get('RVOL',0)}x`\n"
-                 f"   🎯 TP: `{r['TP']:,}` | 🛑 SL: `{r['SL']:,}`\n"
-                 f"   💡 _{r.get('Reasons','')[:60]}_\n")
+        sig    = r.get('Signal', '-')
+        ticker = r.get('Ticker', r.get('Pair', r.get('Coin', '?')))
+        price  = r.get('Price', 0)
+        tp_v   = r.get('TP', 0); sl_v = r.get('SL', 0)
+        em     = "💎" if ("BAGGER" in sig or "KANDIDAT" in sig) else ("🏆" if ("GACOR" in sig or "REVERSAL" in sig) else ("🔥" if "POTENSIAL" in sig else "👀"))
+        te     = "📈" if "▲" in r.get('Trend','') else ("📉" if "▼" in r.get('Trend','') else "➡️")
+        body  += (f"\n{em} *{ticker}*  `{sig}`\n"
+                  f"   💰 Price: `{price:,}` {te}\n"
+                  f"   📈 RSI: `{r.get('RSI-EMA', r.get('RSI_EMA', 0))}` | RVOL: `{r.get('RVOL',0)}x`\n"
+                  f"   🎯 TP: `{tp_v:,}` | 🛑 SL: `{sl_v:,}`\n"
+                  f"   💡 _{r.get('Reasons','')[:60]}_\n")
     footer = f"\n{sep}\n⚡ _Theta Turbo v5 · 15M_\n⚠️ _BUKAN saran investasi!_"
     try:
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
@@ -1221,7 +1224,7 @@ with tab_scanner:
                     if _is_bagger_scan:
                         # Daily volume = langsung dari bar
                         daily_turn = float(r['Close']) * float(r['Volume'])
-                        if daily_turn < min_turn or rvol < max(vol_thresh * 0.5, 0.5): continue
+                        if daily_turn < min_turn * 0.1 or rvol < 0.3: continue
                     else:
                         if turnover < min_turn or rvol < vol_thresh: continue
 
@@ -1495,7 +1498,7 @@ with tab_watchlist:
         st.caption(f"Regime suggest: {rcfg['mode']}")
     with wc3:
         st.markdown("<br>", unsafe_allow_html=True)
-        wl_force = st.toggle("🔄 Fresh", value=False, key="wl_fresh")
+        # Fresh data toggle removed — DS cache TTL handle ini
         wl_run   = st.button("🔍 Analisa", use_container_width=True, key="wl_run")
         wl_tele  = st.button("📡 Kirim Telegram", use_container_width=True, key="wl_tele")
 
@@ -1510,7 +1513,7 @@ with tab_watchlist:
                 df = None
                 try:
                     if DS_KEY:
-                        df = fetch_ds_ohlcv(t, "15m", 200, wl_force)
+                        df = fetch_ds_ohlcv(t, "15m", 200, False)
                     if df is None:
                         raw = yf.download(t+".JK", period="5d", interval="15m",
                                           progress=False, auto_adjust=True, threads=False)
