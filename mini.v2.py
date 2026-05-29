@@ -1420,7 +1420,7 @@ with tab_scanner:
         _mnt_cd  = int(_rem_cd//60); _sec_cd=int(_rem_cd%60)
         _last_cd = datetime.fromtimestamp(st.session_state.last_scan_time,jakarta_tz).strftime("%H:%M:%S")
         _el      = int(_now_cd-st.session_state.last_scan_time)
-        st.caption(f"⏱️ Scan {_el//60}m {_el%60}s lalu · Refresh dalam: {_mnt_cd:02d}:{_sec_cd:02d} · Last: {_last_cd} WIB · {'🔄 Fresh' if force_fresh else '💾 Cache'}")
+        st.caption(f"⏱️ Scan {_el//60}m {_el%60}s lalu · Refresh dalam: {_mnt_cd:02d}:{_sec_cd:02d} · Last: {_last_cd} WIB")
 
     results = st.session_state.scan_results
     if not results and not do_scan_btn and not auto_trigger:
@@ -1741,7 +1741,7 @@ with tab_bsjp:
         bsjp_min_rvol =st.slider("Min RVOL",1.0,5.0,1.5,0.1,key="bsjp_rvol")
     with bc2:
         bsjp_min_turn=st.number_input("Min Turnover (M Rp)",value=500,step=100,key="bsjp_turn")*1_000_000
-        bsjp_fresh=st.toggle("🔄 Fresh Data",value=False,key="bsjp_fresh")
+    # Fresh data toggle removed — cache TTL handle ini
 
     do_bsjp=st.button("🌙 SCAN BSJP SEKARANG",type="primary",use_container_width=True,key="btn_bsjp")
 
@@ -1750,7 +1750,7 @@ with tab_bsjp:
         if not scan_data:
             _pb2=st.progress(0)
             st.info("Fetching data untuk BSJP...")
-            scan_data=fetch_intraday(tuple(stocks_yf[:200]), force_fresh=bsjp_fresh)
+            scan_data=fetch_intraday(tuple(stocks_yf[:200]), force_fresh=False)
             _pb2.empty()
         pb_bsjp=st.progress(0); tickers_bsjp=list(scan_data.keys())
         for i,ticker_yf in enumerate(tickers_bsjp):
