@@ -858,6 +858,36 @@ def send_telegram(results_top, source="Scanner"):
     except: pass
 
 # ════════════════════════════════════════════════════
+#  YFINANCE SAFE EXTRACTOR — handles all yfinance versions
+#  Fixes MultiIndex structure yang berubah di versi 0.2.x+
+# ════════════════════════════════════════════════════
+def _yf_extract(raw, ticker, n_batch):
+    """Robust extraction dari yfinance multi-download — handles semua versi."""
+    try:
+        if raw is None or raw.empty: return None
+        if n_batch == 1:
+            df = raw.copy()
+        else:
+            if not isinstance(raw.columns, pd.MultiIndex): return None
+            l0 = list(raw.columns.get_level_values(0).unique())
+            l1 = list(raw.columns.get_level_values(1).unique())
+            if ticker in l0:   df = raw[ticker].copy()
+            elif ticker in l1: df = raw.xs(ticker, axis=1, level=1).copy()
+            else: return None
+        # Flatten remaining MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(-1)
+        # Normalize column names
+        rename = {c: c.capitalize() for c in df.columns if c.islower()}
+        if rename: df = df.rename(columns=rename)
+        required = ['Open','High','Low','Close','Volume']
+        if any(c not in df.columns for c in required): return None
+        df = df[required].dropna(subset=['Close'])
+        df = df[df['Volume'] > 0]
+        return df if len(df) > 0 else None
+    except: return None
+
+# ════════════════════════════════════════════════════
 #  SEKTOR
 # ════════════════════════════════════════════════════
 SECTORS = {
@@ -883,9 +913,8 @@ def fetch_sector_rotation(sector_stocks):
         for t in tickers_yf:
             tkr = t.replace(".JK","")
             try:
-                df = raw[t].dropna() if len(tickers_yf)>1 else raw.dropna()
-                if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.droplevel(1)
-                if len(df)<2: continue
+                df = _yf_extract(raw, t, len(tickers_yf))
+                if df is None or len(df)<2: continue
                 close=float(df["Close"].iloc[-1]); prev=float(df["Close"].iloc[-2])
                 chg=(close-prev)/prev*100; vol=float(df["Volume"].iloc[-1])
                 avg_v=float(df["Volume"].mean()); rvol=vol/avg_v if avg_v>0 else 1.0
@@ -937,12 +966,8 @@ def scan_gap_up(tickers_yf, min_gap_pct=0.5):
             for t in batch:
                 tkr = t.replace(".JK","")
                 try:
-                    if len(batch)>1: df=raw[t].dropna()
-                    else:
-                        df=raw.copy()
-                        if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.droplevel(1)
-                        df=df.dropna()
-                    if len(df)<3: continue
+                    df = _yf_extract(raw, t, len(batch))
+                    if df is None or len(df)<3: continue
                     today=df.iloc[-1]; prev=df.iloc[-2]
                     close=float(today["Close"]); high_t=float(today["High"]); low_t=float(today["Low"])
                     high_p=float(prev["High"]); vol=float(today["Volume"])
@@ -1063,8 +1088,7 @@ with tab_scanner:
             st.markdown('<div class="settings-label">TAMPILAN</div>', unsafe_allow_html=True)
             view_mode  = st.radio("View", ["Card View 🃏","Table View 📊"], label_visibility="collapsed", key="view_mode")
             quick_mode = st.toggle("⚡ Quick (200 saham)", value=False, key="quick_mode")
-            force_fresh= st.toggle("🔄 Fresh Data", value=False, key="force_fresh",
-                                   help="Skip cache, paksa fetch ulang dari API")
+            # Fresh data toggle removed — cache TTL handle ini otomatis
             st.caption(f"🎯 Regime: {regime} · Mode: {scan_mode}")
 
     # Scan button — INLINE, no st.rerun defer
@@ -1109,11 +1133,10 @@ with tab_scanner:
             need_fetch = []
             for t in ticker_list:
                 raw_t = t.replace(".JK","").upper()
-                if not force_fresh:
-                    cached = _cache_get(raw_t, "15m")
-                    if cached is not None:
-                        data_dict[t] = cached
-                        continue
+                cached = _cache_get(raw_t, _scan_tf)
+                if cached is not None:
+                    data_dict[t] = cached
+                    continue
                 need_fetch.append(t)
 
             n_cached = len(data_dict)
@@ -1128,7 +1151,7 @@ with tab_scanner:
                 raw_t = t.replace(".JK","").upper()
                 # Bagger 💎: DS tidak support daily → langsung skip ke yFinance
                 if DS_KEY and not _is_bagger_scan:
-                    df = fetch_ds_ohlcv(raw_t, "15m", 200, True)
+                    df = fetch_ds_ohlcv(raw_t, _scan_tf, 200, True)
                     if df is not None: return t, df
                 return t, None
 
@@ -1150,6 +1173,37 @@ with tab_scanner:
                                 f'⚡ Fetched {done_count[0]}/{n_need} · {len(data_dict)} berhasil...</div>',
                                 unsafe_allow_html=True)
                     except: done_count[0] += 1
+
+            # ══ yFinance BATCH FALLBACK ══
+            # Runs untuk SEMUA ticker yang masih missing (DS quota habis, DS fail, dll)
+            missing_yf = [t for t in ticker_list if t not in data_dict]
+            if missing_yf:
+                prog_ph.markdown(
+                    f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">' 
+                    f'📊 yFinance fallback: {len(missing_yf)} ticker · {_scan_tf.upper()} · batch download...</div>',
+                    unsafe_allow_html=True)
+                for i_yf in range(0, len(missing_yf), 25):
+                    batch_yf = missing_yf[i_yf:i_yf+25]
+                    try:
+                        raw_yf = yf.download(
+                            list(batch_yf),
+                            period=_scan_period, interval=_scan_tf,
+                            group_by='ticker', progress=False,
+                            threads=True, auto_adjust=True)
+                        for t_yf in batch_yf:
+                            try:
+                                df_yf = _yf_extract(raw_yf, t_yf, len(batch_yf))
+                                if df_yf is not None and len(df_yf) >= _min_bars:
+                                    data_dict[t_yf] = df_yf
+                            except: pass
+                    except: pass
+                    pct = 0.50 + (i_yf + 25) / max(len(missing_yf), 1) * 0.25
+                    pb.progress(min(pct, 0.76))
+                    time.sleep(0.2)
+                prog_ph.markdown(
+                    f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">' 
+                    f'✅ Total data: {len(data_dict)} saham siap ({len(missing_yf)} via yFinance)</div>',
+                    unsafe_allow_html=True)
 
             st.session_state.data_dict = data_dict
 
