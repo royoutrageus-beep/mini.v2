@@ -978,6 +978,72 @@ def score_bsjp(r,p,p2):
     if float(r["Close"])>float(r["VWAP"]): score+=0.5; reasons.append("Above VWAP")
     return max(0,min(6,round(score,1))),reasons,{}
 
+
+@st.cache_data(ttl=3600)
+def fetch_all_sectors(sectors_dict, top_n=10, is_jk=True):
+    """Fetch SEMUA sektor dalam 1 pass humanized. Split hasil per sektor."""
+    suffix = ".JK" if is_jk else ""
+    ticker_to_sectors = {}
+    for sec_name, sec_stocks in sectors_dict.items():
+        for s in sec_stocks[:top_n]:
+            t = s + suffix
+            if t not in ticker_to_sectors:
+                ticker_to_sectors[t] = []
+            ticker_to_sectors[t].append(sec_name)
+    all_tickers = list(ticker_to_sectors.keys())
+    results_raw = {}
+    batches = _random_chunks(all_tickers, min_sz=5, max_sz=10)
+    n_b = len(batches)
+    for bi, batch in enumerate(batches):
+        if not batch: continue
+        try:
+            raw = yf.download(list(batch), period="5d", interval="1d",
+                              group_by="ticker", progress=False,
+                              threads=False, auto_adjust=True, session=_YF_SESSION)
+            for t in batch:
+                tkr = t.replace(".JK","") if is_jk else t
+                try:
+                    df = _yf_extract(raw, t, len(batch))
+                    if df is None or len(df)<2: continue
+                    close=float(df["Close"].iloc[-1]); prev=float(df["Close"].iloc[-2])
+                    chg=(close-prev)/prev*100; vol=float(df["Volume"].iloc[-1])
+                    avg_v=float(df["Volume"].mean()); rvol=vol/avg_v if avg_v>0 else 1.0
+                    results_raw[t]={"ticker":tkr,"close":close,"chg":chg,"rvol":round(rvol,2)}
+                except: pass
+        except:
+            for t in batch:
+                if t in results_raw: continue
+                tkr = t.replace(".JK","") if is_jk else t
+                try:
+                    if is_jk:
+                        df=_ticker_history(t,"5d","1d")
+                    else:
+                        df=None
+                    if df is None:
+                        raw_s=yf.download(t,period="5d",interval="1d",progress=False,
+                                          auto_adjust=True,threads=False,session=_YF_SESSION)
+                        df=_yf_extract(raw_s,t,1)
+                    if df is None or len(df)<2: continue
+                    close=float(df["Close"].iloc[-1]); prev=float(df["Close"].iloc[-2])
+                    chg=(close-prev)/prev*100; vol=float(df["Volume"].iloc[-1])
+                    avg_v=float(df["Volume"].mean()); rvol=vol/avg_v if avg_v>0 else 1.0
+                    results_raw[t]={"ticker":tkr,"close":close,"chg":chg,"rvol":round(rvol,2)}
+                except: pass
+                time.sleep(random.uniform(0.3,0.8))
+        _human_sleep(bi,n_b)
+    # Split per sektor
+    sec_data={}
+    for sec_name,sec_stocks in sectors_dict.items():
+        sec_results=[results_raw[s+suffix] for s in sec_stocks[:top_n] if (s+suffix) in results_raw]
+        if not sec_results: continue
+        avg_chg=sum(r["chg"] for r in sec_results)/len(sec_results)
+        avg_rvol=sum(r["rvol"] for r in sec_results)/len(sec_results)
+        bullish=sum(1 for r in sec_results if r["chg"]>0)
+        sec_data[sec_name]={"avg_chg":round(avg_chg,2),"avg_rvol":round(avg_rvol,2),
+                            "bullish":bullish,"total":len(sec_results),"stocks":sec_results}
+    return sec_data
+
+
 @st.cache_data(ttl=300)
 def scan_gap_up(tickers_yf, min_gap_pct=0.5):
     results=[]
@@ -1708,20 +1774,7 @@ with tab_sector:
     do_sector=st.button("🏭 REFRESH SECTORS",type="primary",use_container_width=True,key="btn_sector")
     if do_sector:
         with st.spinner("Fetching sector data..."):
-            sec_data={}
-            secs_list=list(SECTORS.items())
-            n_secs=len(secs_list)
-            for si,(sec_name,sec_stocks) in enumerate(secs_list):
-                results=fetch_sector_rotation(sec_stocks)
-                if results:
-                    avg_chg=sum(r["chg"] for r in results)/len(results)
-                    avg_rvol=sum(r["rvol"] for r in results)/len(results)
-                    bullish=sum(1 for r in results if r["chg"]>0)
-                    sec_data[sec_name]={"avg_chg":round(avg_chg,2),"avg_rvol":round(avg_rvol,2),
-                                        "bullish":bullish,"total":len(results),"stocks":results,
-                                        "is_hormuz":sec_name in HORMUZ_SECTORS}
-                # Humanized inter-sector pause
-                _human_sleep(si, n_secs)
+            sec_data=fetch_all_sectors(SECTORS,top_n=10,is_jk=True)
             st.session_state.sector_data=sec_data
     if st.session_state.sector_data:
         sorted_secs=sorted(st.session_state.sector_data.items(),key=lambda x:x[1]["avg_chg"],reverse=True)
