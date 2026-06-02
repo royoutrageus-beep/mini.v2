@@ -388,100 +388,87 @@ def _yf_extract(raw, ticker, n_batch):
 # ════════════════════════════════════════════════════
 @st.cache_data(ttl=300)
 def fetch_intraday(tickers, chunk=None):
-    """
-    Proven fetch engine — _ticker_history() per ticker.
-    Real secret dari HF Terminal: @cache(ttl=300) agresif
-    + random delay kecil = tidak kena rate limit.
-    """
     all_dfs = {}
     batches = _random_chunks(list(tickers), min_sz=5, max_sz=15)
-    n_b = len(batches)
+    n_b     = len(batches)
     for bi, batch in enumerate(batches):
         if not batch: continue
-        # Try batch download dulu (lebih efisien)
-        if len(batch) > 1:
+        if len(batch) == 1:
+            try:
+                df = _ticker_history(batch[0], "7d", "15m")
+                if df is None:
+                    raw = yf.download(batch[0], period="7d", interval="15m",
+                                      progress=False, auto_adjust=True,
+                                      threads=False, session=_YF_SESSION)
+                    df  = _yf_extract(raw, batch[0], 1)
+                if df is not None and len(df) >= 30:
+                    all_dfs[batch[0]] = df
+            except: pass
+            time.sleep(random.uniform(0.2, 0.6))
+        else:
             try:
                 raw = yf.download(
                     list(batch), period="7d", interval="15m",
-                    group_by="ticker", progress=False,
-                    auto_adjust=True, threads=False,
-                    session=_YF_SESSION,
+                    group_by='ticker', progress=False,
+                    threads=False, auto_adjust=True, session=_YF_SESSION
                 )
-                if raw is not None and not raw.empty:
-                    got = 0
-                    for t in batch:
-                        try:
-                            df = _yf_extract(raw, t, len(batch))
-                            if df is not None and len(df) >= 30:
-                                all_dfs[t] = df; got += 1
-                        except: pass
-                    if got >= len(batch) // 2:
-                        _human_sleep(bi, n_b)
-                        continue  # batch sukses, lanjut
-            except: pass
-        # Fallback: _ticker_history() per ticker (proven jalan di production)
-        for t in batch:
-            if t in all_dfs: continue
-            try:
-                df = _ticker_history(t, "7d", "15m")
-                if df is None:
-                    raw = yf.download(t, period="7d", interval="15m",
-                                      progress=False, auto_adjust=True,
-                                      threads=False, session=_YF_SESSION)
-                    df = _yf_extract(raw, t, 1)
-                if df is not None and len(df) >= 30:
-                    all_dfs[t] = df
-            except: pass
-            time.sleep(random.uniform(0.2, 0.6))
+                for t in batch:
+                    try:
+                        df = _yf_extract(raw, t, len(batch))
+                        if df is not None and len(df) >= 30:
+                            all_dfs[t] = df
+                    except: pass
+            except:
+                for t in batch:
+                    if t in all_dfs: continue
+                    try:
+                        df = _ticker_history(t, "7d", "15m")
+                        if df is None:
+                            raw = yf.download(t, period="7d", interval="15m",
+                                              progress=False, auto_adjust=True,
+                                              threads=False, session=_YF_SESSION)
+                            df  = _yf_extract(raw, t, 1)
+                        if df is not None and len(df) >= 30:
+                            all_dfs[t] = df
+                    except: pass
+                    time.sleep(random.uniform(0.2, 0.5))
         _human_sleep(bi, n_b)
     return all_dfs
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def fetch_daily_bagger(tickers, chunk=None):
-    """
-    Bagger: daily 60d — lebih ringan, cache 1 jam.
-    _ticker_history proven + try batch download dulu.
-    """
+    """Fetch 60-hari DAILY untuk Wyckoff Bagger — HUMANIZED v2."""
     all_dfs = {}
     batches = _random_chunks(list(tickers), min_sz=8, max_sz=25)
-    n_b = len(batches)
+    n_b     = len(batches)
     for bi, batch in enumerate(batches):
         if not batch: continue
-        # Try batch download dulu
-        if len(batch) > 1:
-            try:
-                raw = yf.download(
-                    list(batch), period="60d", interval="1d",
-                    group_by="ticker", progress=False,
-                    auto_adjust=True, threads=False,
-                    session=_YF_SESSION,
-                )
-                if raw is not None and not raw.empty:
-                    got = 0
-                    for t in batch:
-                        try:
-                            df = _yf_extract(raw, t, len(batch))
-                            if df is not None and len(df) >= 20:
-                                all_dfs[t] = df; got += 1
-                        except: pass
-                    if got >= len(batch) // 2:
-                        _human_sleep(bi, n_b)
-                        continue
-            except: pass
-        # Fallback: per ticker
-        for t in batch:
-            if t in all_dfs: continue
-            try:
-                df = _ticker_history(t, "60d", "1d")
-                if df is None:
-                    raw = yf.download(t, period="60d", interval="1d",
-                                      progress=False, auto_adjust=True,
-                                      threads=False, session=_YF_SESSION)
-                    df = _yf_extract(raw, t, 1)
-                if df is not None and len(df) >= 20:
-                    all_dfs[t] = df
-            except: pass
-            time.sleep(random.uniform(0.1, 0.4))
+        try:
+            raw = yf.download(
+                list(batch), period="60d", interval="1d",
+                group_by='ticker', progress=False,
+                threads=False, auto_adjust=True, session=_YF_SESSION
+            )
+            for t in batch:
+                try:
+                    df = _yf_extract(raw, t, len(batch))
+                    if df is not None and len(df) >= 20:
+                        all_dfs[t] = df
+                except: pass
+        except:
+            for t in batch:
+                if t in all_dfs: continue
+                try:
+                    df = _ticker_history(t, "60d", "1d")
+                    if df is None:
+                        raw = yf.download(t, period="60d", interval="1d",
+                                          progress=False, auto_adjust=True,
+                                          threads=False, session=_YF_SESSION)
+                        df  = _yf_extract(raw, t, 1)
+                    if df is not None and len(df) >= 20:
+                        all_dfs[t] = df
+                except: pass
+                time.sleep(random.uniform(0.2, 0.6))
         _human_sleep(bi, n_b)
     return all_dfs
 
@@ -1378,28 +1365,6 @@ with tab_scanner:
         try:
             if is_bagger:
                 data_dict=fetch_daily_bagger(tuple(scan_list))
-            elif DS_KEY:
-                # ── HYBRID: DS primary + yFinance humanized fallback ──
-                data_dict={}
-                _scan_tf_ds="15m"
-                # DS parallel fetch (ThreadPoolExecutor — DS bukan Yahoo, no rate limit)
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-                def _ds_f(t):
-                    raw_t=t.replace(".JK","").upper()
-                    df=fetch_ds_ohlcv(raw_t,_scan_tf_ds,200,True)
-                    return t,df
-                with ThreadPoolExecutor(max_workers=10) as ex:
-                    futs={ex.submit(_ds_f,t):t for t in scan_list}
-                    for fut in as_completed(futs):
-                        try:
-                            t,df=fut.result(timeout=15)
-                            if df is not None and len(df)>=20: data_dict[t]=df
-                        except: pass
-                # yFinance humanized fallback untuk yang missing dari DS
-                _missing=[t for t in scan_list if t not in data_dict]
-                if _missing:
-                    _fb=fetch_intraday(tuple(_missing))
-                    data_dict.update(_fb)
             else:
                 data_dict=fetch_intraday(tuple(scan_list))
             st.session_state.data_dict=data_dict; n_fetched=len(data_dict)
