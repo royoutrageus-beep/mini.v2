@@ -1231,26 +1231,59 @@ with tab_scanner:
             missing_yf=[t for t in ticker_list if t not in data_dict]
             if missing_yf:
                 prog_ph.markdown(f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">📊 yFinance humanized fallback: {len(missing_yf)} ticker...</div>',unsafe_allow_html=True)
-                _batches_yf=_random_chunks(missing_yf,min_sz=5,max_sz=12)
+                # BATCH download — sama kayak YF Theta, bukan individual
+                _iv="1d" if _is_bagger_scan else "15m"
+                _per="60d" if _is_bagger_scan else "7d"
+                _batches_yf=_random_chunks(missing_yf,min_sz=5,max_sz=15)
                 _total_b=len(_batches_yf)
                 for _bi,batch_yf in enumerate(_batches_yf):
-                    for t_yf in batch_yf:
-                        if t_yf in data_dict: continue
-                        _iv="1d" if _is_bagger_scan else "15m"
-                        _per="60d" if _is_bagger_scan else "7d"
-                        df_got=_ticker_history(t_yf,_per,_iv)
-                        if df_got is None and _is_bagger_scan:
-                            try: df_got=_stooq_fetch(t_yf.replace(".JK",""),"1d")
-                            except: pass
-                        if df_got is None:
-                            try:
+                    if not batch_yf: continue
+                    if len(batch_yf)==1:
+                        # Single ticker — coba _ticker_history dulu
+                        t_yf=batch_yf[0]
+                        if t_yf in data_dict: 
+                            _human_sleep(_bi,_total_b); continue
+                        try:
+                            df_got=_ticker_history(t_yf,_per,_iv)
+                            if df_got is None and _is_bagger_scan:
+                                try: df_got=_stooq_fetch(t_yf.replace(".JK",""),"1d")
+                                except: pass
+                            if df_got is None:
                                 _rw=yf.download(t_yf,period=_per,interval=_iv,
-                                    progress=False,auto_adjust=True,threads=False,session=_YF_SESSION)
+                                    progress=False,auto_adjust=True,
+                                    threads=False,session=_YF_SESSION)
                                 df_got=_yf_extract(_rw,t_yf,1)
-                            except: pass
-                        if df_got is not None and len(df_got)>=_min_bars:
-                            data_dict[t_yf]=df_got
-                        time.sleep(random.uniform(0.2,0.6))
+                            if df_got is not None and len(df_got)>=_min_bars:
+                                data_dict[t_yf]=df_got
+                        except: pass
+                    else:
+                        # BATCH download — jauh lebih efisien
+                        try:
+                            _rw=yf.download(list(batch_yf),period=_per,interval=_iv,
+                                group_by="ticker",progress=False,
+                                threads=False,auto_adjust=True,session=_YF_SESSION)
+                            for t_yf in batch_yf:
+                                if t_yf in data_dict: continue
+                                try:
+                                    df_got=_yf_extract(_rw,t_yf,len(batch_yf))
+                                    if df_got is not None and len(df_got)>=_min_bars:
+                                        data_dict[t_yf]=df_got
+                                except: pass
+                        except:
+                            # Individual fallback kalau batch gagal
+                            for t_yf in batch_yf:
+                                if t_yf in data_dict: continue
+                                try:
+                                    df_got=_ticker_history(t_yf,_per,_iv)
+                                    if df_got is None:
+                                        _rw=yf.download(t_yf,period=_per,interval=_iv,
+                                            progress=False,auto_adjust=True,
+                                            threads=False,session=_YF_SESSION)
+                                        df_got=_yf_extract(_rw,t_yf,1)
+                                    if df_got is not None and len(df_got)>=_min_bars:
+                                        data_dict[t_yf]=df_got
+                                except: pass
+                                time.sleep(random.uniform(0.2,0.5))
                     _human_sleep(_bi,_total_b)
                 prog_ph.markdown(f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">✅ yFinance: {len(data_dict)} saham siap</div>',unsafe_allow_html=True)
             st.session_state.data_dict=data_dict
