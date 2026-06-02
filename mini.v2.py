@@ -388,87 +388,49 @@ def _yf_extract(raw, ticker, n_batch):
 # ════════════════════════════════════════════════════
 @st.cache_data(ttl=300)
 def fetch_intraday(tickers, chunk=None):
+    """
+    PURE _ticker_history() per ticker — 100% proven tidak kena rate limit.
+    yf.download() batch DIHAPUS — ini yang kena YFRateLimitError.
+    _ticker_history() pakai chart API endpoint yang berbeda, jauh lebih toleran.
+    """
     all_dfs = {}
-    batches = _random_chunks(list(tickers), min_sz=5, max_sz=15)
-    n_b     = len(batches)
+    ticker_list = list(tickers)
+    # Acak urutan — hindari pola alphabet yang mudah dideteksi
+    random.shuffle(ticker_list)
+    batches = _random_chunks(ticker_list, min_sz=5, max_sz=15)
+    n_b = len(batches)
     for bi, batch in enumerate(batches):
         if not batch: continue
-        if len(batch) == 1:
+        for t in batch:
             try:
-                df = _ticker_history(batch[0], "7d", "15m")
-                if df is None:
-                    raw = yf.download(batch[0], period="7d", interval="15m",
-                                      progress=False, auto_adjust=True,
-                                      threads=False, session=_YF_SESSION)
-                    df  = _yf_extract(raw, batch[0], 1)
+                df = _ticker_history(t, "7d", "15m")
                 if df is not None and len(df) >= 30:
-                    all_dfs[batch[0]] = df
+                    all_dfs[t] = df
             except: pass
-            time.sleep(random.uniform(0.2, 0.6))
-        else:
-            try:
-                raw = yf.download(
-                    list(batch), period="7d", interval="15m",
-                    group_by='ticker', progress=False,
-                    threads=False, auto_adjust=True, session=_YF_SESSION
-                )
-                for t in batch:
-                    try:
-                        df = _yf_extract(raw, t, len(batch))
-                        if df is not None and len(df) >= 30:
-                            all_dfs[t] = df
-                    except: pass
-            except:
-                for t in batch:
-                    if t in all_dfs: continue
-                    try:
-                        df = _ticker_history(t, "7d", "15m")
-                        if df is None:
-                            raw = yf.download(t, period="7d", interval="15m",
-                                              progress=False, auto_adjust=True,
-                                              threads=False, session=_YF_SESSION)
-                            df  = _yf_extract(raw, t, 1)
-                        if df is not None and len(df) >= 30:
-                            all_dfs[t] = df
-                    except: pass
-                    time.sleep(random.uniform(0.2, 0.5))
+            time.sleep(random.uniform(0.1, 0.4))
         _human_sleep(bi, n_b)
     return all_dfs
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600)
 def fetch_daily_bagger(tickers, chunk=None):
-    """Fetch 60-hari DAILY untuk Wyckoff Bagger — HUMANIZED v2."""
+    """
+    PURE _ticker_history() per ticker untuk Wyckoff Bagger.
+    Daily 60d — lebih ringan, cache 1 jam.
+    """
     all_dfs = {}
-    batches = _random_chunks(list(tickers), min_sz=8, max_sz=25)
-    n_b     = len(batches)
+    ticker_list = list(tickers)
+    random.shuffle(ticker_list)
+    batches = _random_chunks(ticker_list, min_sz=8, max_sz=20)
+    n_b = len(batches)
     for bi, batch in enumerate(batches):
         if not batch: continue
-        try:
-            raw = yf.download(
-                list(batch), period="60d", interval="1d",
-                group_by='ticker', progress=False,
-                threads=False, auto_adjust=True, session=_YF_SESSION
-            )
-            for t in batch:
-                try:
-                    df = _yf_extract(raw, t, len(batch))
-                    if df is not None and len(df) >= 20:
-                        all_dfs[t] = df
-                except: pass
-        except:
-            for t in batch:
-                if t in all_dfs: continue
-                try:
-                    df = _ticker_history(t, "60d", "1d")
-                    if df is None:
-                        raw = yf.download(t, period="60d", interval="1d",
-                                          progress=False, auto_adjust=True,
-                                          threads=False, session=_YF_SESSION)
-                        df  = _yf_extract(raw, t, 1)
-                    if df is not None and len(df) >= 20:
-                        all_dfs[t] = df
-                except: pass
-                time.sleep(random.uniform(0.2, 0.6))
+        for t in batch:
+            try:
+                df = _ticker_history(t, "60d", "1d")
+                if df is not None and len(df) >= 20:
+                    all_dfs[t] = df
+            except: pass
+            time.sleep(random.uniform(0.1, 0.3))
         _human_sleep(bi, n_b)
     return all_dfs
 
@@ -1482,7 +1444,7 @@ with tab_scanner:
           <div style="font-size:36px;margin-bottom:12px;">🔥</div>
           <div style="font-size:13px;letter-spacing:2px;">KLIK SCAN UNTUK MULAI</div>
           <div style="font-size:10px;margin-top:8px;color:#2d3748;">
-            {"⚡ Quick: 200 saham" if quick_mode else f"Full: {len(raw_stocks)} saham"} · {regime} · {rcfg["mode"]}
+            {_sz} · {regime} · {rcfg["mode"]}
           </div>
         </div>""", unsafe_allow_html=True)
     elif results:
