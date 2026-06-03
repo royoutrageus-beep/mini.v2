@@ -715,9 +715,10 @@ with tab_scanner:
         if _nc-st.session_state.last_scan_time>=300 and st.session_state.scan_results:
             do_scan=True; scan_mode=st.session_state.get("active_scan_mode",scan_mode)
 
+    _sz=st.session_state.get("ss","200 🔥")  # define di sini biar always available
+
     if do_scan:
         _LQ45=[s+".JK" for s in ["BBCA","BBRI","BMRI","TLKM","ASII","GOTO","BYAN","MDKA","UNVR","ICBP","INDF","KLBF","SIDO","MNCN","EXCL","TOWR","PGAS","PTBA","ADRO","ITMG","INCO","HRUM","JSMR","SMGR","WIKA","WSKT","ANTM","PTPP","TBIG","BRIS","AMMN","MBMA","CUAN","BBNI","BBTN","BMTR","INKP","BRPT","TPIA","BREN","EMTK","PANI","DSSA","ISAT","PGAS"]]
-        _sz=st.session_state.get("ss","200 🔥")
         if "45" in _sz:    sl=_LQ45
         elif "200" in _sz: sl=stocks_yf[:200]
         else:              sl=stocks_yf
@@ -801,25 +802,13 @@ with tab_scanner:
         lm=st.session_state.get("last_scan_mode","")
         st.caption(f"⏱️ Next auto-scan: {int(_rem//60):02d}:{int(_rem%60):02d} · Last: {_lt} WIB · {'📅 Daily' if lm=='Bagger 💎' else '⚡ 15M'} · {lm}")
 
-        results = st.session_state.scan_results
-
-    # === JINAKKAN VARIABEL DI SINI (SOLUSI) ===
-    # Kita kasih nilai default "-" kalau variabelnya belum pernah dibuat
-    _sz = _sz if '_sz' in locals() else "-"
-    regime = regime if 'regime' in locals() else "-"
-    
-    # Untuk rcfg, kita cek apakah sudah ada, kalau belum buat dictionary default
-    if 'rcfg' not in locals():
-        rcfg = {"mode": lm if 'lm' in locals() else "-"} 
-    # ==========================================
-
+    results=st.session_state.scan_results
     if not results and not do_scan:
         st.markdown(f'''<div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;">
           <div style="font-size:36px;margin-bottom:12px;">🔥</div>
           <div style="font-size:13px;letter-spacing:2px;">KLIK SCAN UNTUK MULAI</div>
           <div style="font-size:10px;margin-top:8px;color:#2d3748;">{_sz} · {regime} · {rcfg["mode"]}</div>
-        </div>''', unsafe_allow_html=True)
-
+        </div>''',unsafe_allow_html=True)
     elif results:
         df_out=pd.DataFrame(results).sort_values("Score",ascending=False).reset_index(drop=True)
         gacor=df_out[df_out["Signal"].str.contains("GACOR|REVERSAL",na=False)]
