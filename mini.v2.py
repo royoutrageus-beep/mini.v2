@@ -643,19 +643,20 @@ def get_market_regime():
         return ("UNKNOWN", 0, 0, 0, f"IHSG error: {str(e)[:40]}", 0.0)
 
 def get_regime_config(regime):
+    # Threshold realistis — sebelumnya terlalu ketat (min_rvol 2.0 = 90% saham gak lolos)
     return {
-        "RED":     {"mode":"Reversal 🎯","min_score":5,"min_rvol":2.0,"sl_mult":0.6,
-                    "label":"🔴 MARKET MERAH — Reversal Only, Score ≥ 5","color":"#ff3d5a",
-                    "desc":"Market bearish. Fokus reversal oversold, filter ketat."},
-        "GREEN":   {"mode":"Bagger 💎","min_score":4,"min_rvol":2.0,"sl_mult":0.8,
-                    "label":"🟢 MARKET HIJAU — Wyckoff Bagger Hunt, Score ≥ 4","color":"#00ff88",
+        "RED":     {"mode":"Reversal 🎯","min_score":3,"min_rvol":1.2,"sl_mult":0.6,
+                    "label":"🔴 MARKET MERAH — Reversal Only, Score ≥ 3","color":"#ff3d5a",
+                    "desc":"Market bearish. Fokus reversal oversold, filter moderat."},
+        "GREEN":   {"mode":"Bagger 💎","min_score":3,"min_rvol":1.3,"sl_mult":0.8,
+                    "label":"🟢 MARKET HIJAU — Wyckoff Bagger Hunt, Score ≥ 3","color":"#00ff88",
                     "desc":"Market bullish. Cari akumulasi Wyckoff + breakout bagger."},
-        "SIDEWAYS":{"mode":"Scalping ⚡","min_score":4,"min_rvol":2.0,"sl_mult":0.7,
-                    "label":"🟡 MARKET SIDEWAYS — Semua Mode, RVOL ≥ 2x","color":"#ffb700",
-                    "desc":"Market sideways. RVOL harus lebih kuat."},
-        "UNKNOWN": {"mode":"Scalping ⚡","min_score":4,"min_rvol":1.5,"sl_mult":0.8,
+        "SIDEWAYS":{"mode":"Scalping ⚡","min_score":3,"min_rvol":1.3,"sl_mult":0.7,
+                    "label":"🟡 MARKET SIDEWAYS — Semua Mode, RVOL ≥ 1.3x","color":"#ffb700",
+                    "desc":"Market sideways. Cari momentum + volume confirmation."},
+        "UNKNOWN": {"mode":"Scalping ⚡","min_score":2,"min_rvol":1.0,"sl_mult":0.8,
                     "label":"⚪ REGIME UNKNOWN — Manual Mode","color":"#4a5568","desc":""},
-    }.get(regime,{"mode":"Scalping ⚡","min_score":4,"min_rvol":1.5,"sl_mult":0.8,"label":"⚪","color":"#4a5568","desc":""})
+    }.get(regime,{"mode":"Scalping ⚡","min_score":2,"min_rvol":1.0,"sl_mult":0.8,"label":"⚪","color":"#4a5568","desc":""})
 
 # ════ PIVOT — pakai Ticker().history() ════
 @st.cache_data(ttl=3600)
