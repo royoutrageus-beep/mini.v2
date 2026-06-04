@@ -20,7 +20,7 @@ CHAT_ID             = st.secrets.get("TELEGRAM_CHAT_ID", "")
 
 jakarta_tz = pytz.timezone("Asia/Jakarta")
 DS_BASE    = "https://api.datasectors.com/api"
-DS_HEADERS = {"X-API-Key": DATASECTORS_API_KEY, "Accept": "*/*"}
+DS_HEADERS = {"X-API-Key": DATASECTORS_API_KEY, "Content-Type": "application/json"}
 
 for _k,_v in [("scan_results",[]),("last_scan_time",None),("data_dict",{}),
                ("wl_results",[]),("wl_mode_used",""),("tt_last_sent",set()),
@@ -106,56 +106,31 @@ button[data-testid="baseButton-primary"]{background:var(--orange)!important;colo
 #  STOCK LIST
 # ════════════════════════════════════════════════════
 raw_stocks = [
-    "AALI","ABBA","ABDA","ABMM","ACES","ACST","ADCP","ADES","ADHI","ADMF","ADMG","ADMR","ADRO","AGII","AGRO","AGRS",
-    "AHAP","AIMS","AISA","AKPI","AKRA","AKSI","ALDO","ALKA","ALMI","ALRE","AMAG","AMAR","AMFG","AMIN","AMMS","AMOR",
-    "AMRT","ANDI","ANJT","ANTM","APEX","APIC","APLI","APLN","ARCI","ARGO","ARII","ARKA","ARKO","ARMY","ARNA","ARTA",
-    "ARTI","ARTO","ASBI","ASCL","ASDM","ASGR","ASII","ASJT","ASLC","ASMI","ASPI","ASRI","ASRM","ASSA","ATAP","ATIC",
-    "ATLI","AUTO","AVIA","AWAN","AXIO","AYLS","BABP","BACA","BAIC","BAPA","BAPI","BARI","BATA","BATU","BAYU","BBCA",
-    "BBHI","BBKP","BBLD","BBMD","BBNI","BBRI","BBRM","BBSI","BBSS","BBTN","BBYB","BCAP","BCIC","BCIP","BDMN","BEBS",
-    "BEEF","BEER","BELI","BESS","BEST","BFIN","BGTG","BHIT","BIAS","BVIC","BIKA","BIMA","BINA","BIPI","BIPP","BIRD",
-    "BISI","BJBR","BJTM","BKDP","BKSL","BKSW","BLTA","BLTZ","BLUE","BMAS","BMBL","BMRI","BMTR","BNBA","BNGA","BNII",
-    "BNLI","BOBA","BOGA","BOKE","BOLA","BORO","BOSS","BPFI","BPII","BPTR","BRAM","BRIS","BRMS","BRNA","BRPT","BSDE",
-    "BSIM","BSML","BSSR","BSWD","BTEK","BTEL","BTON","BTPS","BUDI","BUKK","BULL","BUMI","BUVA","BWPT","BYAN","CAKK",
-    "CAMP","CARS","CASH","CASS","CASY","CBRE","CEKA","CENT","CERE","CESS","CFIN","CHIP","CINT","CITA","CITY","CLAY",
-    "CLEO","CLPI","CMNT","CMPP","CMRY","CNKO","CNMA","CNTX","COAL","COCO","CPIN","CPRI","CPRO","CSAP","CSIS","CSMI",
-    "CSRA","CTBN","CTRA","CTRP","CTRS","CTTH","CUAN","DADA","DAJK","DART","DAYA","DEAL","DEFI","DEIT","DEWA","DFAM",
-    "DGIK","DGNS","DIGI","DILD","DIVA","DKFT","DLTA","DMMX","DMND","DMSX","DMTX","DNAR","DNET","DOID","DPNS","DPUM",
-    "DRMA","DSSA","DSST","DUCK","DUTI","DVLA","DWGL","DYAN","EAST","ECII","EDII","EKAD","ELIT","ELPI","ELSA","ELTY",
-    "EMAS","EMTK","ENRG","EPAC","EPMT","ERAA","ERTX","ESIP","ESSA","ESTA","ESTI","ETWA","EURO","EVIT","EXCL","FAPA",
-    "FAST","FASW","FEST","FIFA","FIMP","FIRE","FISH","FITT","FLMC","FMII","FORU","FORZ","FPNI","FREN","FUAD","FWCT",
-    "GAMA","GDST","GDYR","GEAS","GEMA","GEMS","GGRM","GGRP","GHON","GIAA","GJTL","GLOB","GLVA","GMCU","GMTD","GOLD",
-    "GOOD","GOTO","GPRA","GPSO","GRIA","GRPM","GSMF","GTBO","GWSA","GZCO","HADE","HAIS","HALO","HATM","HDFA","HDIT",
-    "HEAL","HELI","HERO","HEXA","HHPW","HIAM","HITS","HKMU","HMSP","HOKI","HOME","HOPE","HOTL","HRTA","HRUM","IATA",
-    "IBFN","IBOS","ICBP","ICON","IDPR","IFII","IFSH","IGAR","IIKP","IKAI","IKAN","IKBI","IMAS","IMJS","IMPC","INAF",
-    "INAI","INCF","INCO","INDF","INDO","INET","INFN","INFO","INPC","INPP","INPS","INRU","INSG","INTA","INTD","INTP",
-    "IPAC","IPCC","IPCM","IPPE","IPTV","IRRA","ISAP","ISAT","ISIG","ISSP","ITIC","ITMA","ITMG","JAST","JATI","JAVA",
-    "JECC","JGLE","JIHD","JKON","JKSW","JMAS","JPFA","JRPT","JSMR","JSPT","JTPE","KAEF","KARY","KAYU","KBAG","KBLI",
-    "KBLM","KBLV","KBMD","KDSI","KEEN","KEJU","KIAS","KICI","KIJA","KING","KINO","KIOS","KJEN","KKGI","KLAS","KLBF",
-    "KMDS","KMTR","KOBX","KOIN","KOKA","KOKI","KONI","KOPI","KOTA","KPAS","KPIG","KRAH","KRAS","KREN","LAAW","LABA",
-    "LAND","LAPD","LCGP","LCKM","LEAD","LIFE","LION","LPCK","LPGI","LPIN","LPKR","LPLI","LPPS","LPPF","LRNA","LSIP",
-    "LTLS","LUCK","LUCY","MABA","MAGP","MAHA","MAIN","MAMI","MAPA","MAPB","MAPI","MARI","MARK","MASA","MAYA","MBAP",
-    "MBMA","MBSS","MBTO","MCAS","MCOL","MCOR","MDIA","MDKA","MDKI","MDLN","MDPP","MEDC","MEGA","MENN","METI","METR",
-    "METS","MFIN","MFMI","MGNA","MICE","MIDI","MIKA","MINA","MIRA","MITI","MKAP","MKNT","MKPI","MLBI","MLIA","MLMS",
-    "MLPL","MLPT","MMIX","MNCN","MPMX","MPPA","MPRO","MRAT","MREI","MSIN","MSKY","MTDL","MTEL","MTFN","MTLA","MTMH",
-    "MTPS","MTRA","MTSM","MYOH","MYOR","MYPZ","MYRX","MYTX","NANO","NASA","NARE","NATO","NELY","NETV","NFCX","NICK",
-    "NICL","NIRO","NISM","NKEF","NKIT","NLMS","NOBU","NPGF","NRCA","NSSS","NTBK","NUSA","NVAM","NZIA","OASA","OBMD",
-    "OCAP","OCAS","OCDM","OKAS","OLIV","OMRE","OPMS","PADI","PAFI","PAMG","PANI","PANR","PANS","PANT","PARD","PARE",
-    "PBID","PBRX","PBSA","PCAR","PDES","PEGE","PEHA","PELI","PESS","PGAS","PGEO","PGUN","PICO","PJAA","PKPK","PLIN",
-    "PLNB","PLSN","PMJS","PMMP","PNBS","PNIN","PNLF","PNSE","POLA","POLL","POLU","POLY","POOL","PORT","POWR","PPGL",
-    "PPRE","PPRO","PRAS","PRDA","PRIM","PSAB","PSDN","PSGO","PSKT","PSSI","PTBA","PTDU","PTIS","PTPW","PTRO","PTSN",
-    "PTSP","PUDP","PURA","PURE","PURI","PWON","PYFA","RAAM","RACY","RAJA","RALS","RANC","RBMS","RCCC","RELI","REMA",
-    "RGAS","RICY","RIGS","RIMO","RISE","RMKE","RMKO","RODA","RONI","ROTI","SAFE","SAME","SAMF","SAMI","SANK","SANT",
-    "SAPX","SBAT","SBMA","SCCO","SCMA","SCNP","SCRB","SDMU","SDPC","SDRA","SEMA","SGER","SGRO","SHID","SHIP","SIAP",
-    "SILO","SIMA","SIMP","SINI","SIPD","SKBM","SKLT","SKYB","SLIS","SMAR","SMBR","SMCB","SMDM","SMDR","SMGR","SMMA",
-    "SMMT","SMRA","SMRU","SMSM","SNLK","SOFA","SOHO","SONA","SOSS","SOTS","SPMA","SPTO","SQMI","SRAJ","SRIL","SRTG",
-    "SSIA","SSMS","SSTM","STAA","STTP","SUGI","SULI","SUMI","SUNU","SUPR","SURE","SURV","SUTI","SWAT","SWID","TAMA",
-    "TAMU","TARA","TAXI","TBIG","TBLA","TBMS","TCID","TCOA","TCPI","TEBE","TECC","TECH","TELE","TFAS","TFCO","TGKA",
-    "TGUK","TIFA","TINS","TIRA","TIRT","TKIM","TLDN","TLKM","TMAS","TMPO","TNCA","TOBA","TOOL","TOTA","TOWR","TPAI",
-    "TPMA","TRGU","TRIL","TRIM","TRIN","TRIS","TRJA","TRST","TRUE","TRUK","TRUS","TSPC","TUGU","TULI","TYRE","UANG",
-    "UCID","UNIC","UNIT","UNSP","UNTR","UNVR","URBN","UVCR","VICI","VICO","VINS","VIPT","VIVA","VOKS","VOMR","VTNY",
-    "WAPO","WEGE","WEHA","WICO","WIDI","WIFI","WIGL","WIKA","WIKI","WIMM","WINE","WINS","WIRG","WITA","WMUU","WOOD",
-    "WOWS","WSBP","WSKT","WTON","YELO","YPAS","YULE","ZATA","ZBRA","ZINC"
+    "BBCA","BBRI","BMRI","BBNI","TLKM","ASII","UNVR","PGAS","ADRO","ITMG",
+    "PTBA","ANTM","INDF","ICBP","GGRM","HMSP","KLBF","UNTR","AALI","SMGR",
+    "BSDE","CTRA","SMRA","LPKR","PWON","JSMR","WIKA","ADHI","PTPP","WSKT",
+    "ARCI","ASSA","AKRA","BUMI","GOTO","BUKA","EMTK","INET","MEDC","INCO",
+    "MDKA","TINS","HRUM","DOID","RAJA","GEMS","BYAN","ESSA","ELSA","EXCL",
+    "ISAT","TBIG","TOWR","MNCN","SCMA","MAPI","ACES","ERAA","LPPF","HEAL",
+    "MIKA","SILO","SIDO","KAEF","INAF","DVLA","TSPC","MERK","ARTO","BRIS",
+    "BBYB","BJBR","BJTM","BBTN","BDMN","MEGA","BNGA","NISP","AMAR","NOBU",
+    "PNBN","SDRA","CFIN","ADMF","BFIN","DEFI","LPGI","MFIN","BBHI","BCIC",
+    "BGTG","BINA","DNAR","MAYA","MCOR","BABP","BACA","AGRO","TOBA","ABMM",
+    "PTRO","MYOH","KKGI","SGER","MBAP","MBSS","ADMR","BIPI","BOSS","ENRG",
+    "PKPK","RMKE","DEWA","COAL","INDY","APEX","DMAS","BEST","KIJA","MTLA",
+    "JRPT","MKPI","BKSL","GPRA","MDLN","NUSA","DART","CITY","LPCK","APLN",
+    "ASRI","DILD","DUTI","EMDE","MYOR","DLTA","ROTI","SKBM","SKLT","CLEO",
+    "STTP","ULTJ","MLBI","GOOD","HOKI","KEJU","CPIN","JPFA","MAIN","AISA",
+    "ADES","CAMP","BUDI","TBLA","DSNG","SGRO","LSIP","TAPG","SIMP","SSMS",
+    "CPRO","BWPT","ANJT","DCII","WIFI","GLVA","MLPT","MTDL","CHIP","ELIT",
+    "LUCK","AWAN","AXIO","NFCX","DIGI","DIVA","MCAS","WIRG","TECH","SMSM",
+    "HEXA","SCCO","JECC","KBLI","VOKS","LION","PICO","BRAM","GJTL","IMAS",
+    "AUTO","ASGR","ARNA","AMFG","IMPC","MLIA","WTON","INTP","BIRD","GIAA",
+    "SMDR","TMAS","BBRM","NELY","AKSI","SHIP","ELPI","PRDA","SAME","PEHA",
+    "PYFA","IRRA","NCKL","AMMN","BRPT","TPIA","MDKI","BTON","NIKL","SMCB",
+    "AGII","ALDO","ALKA","CTBN","DPNS","RUIS","SURE","IATA","TEBE","WOWS",
 ]
+# Dedup
 seen = set(); raw_stocks = [x for x in raw_stocks if not (x in seen or seen.add(x))]
 stocks_yf = [s + ".JK" for s in raw_stocks]
 stock_map  = {s + ".JK": s for s in raw_stocks}
@@ -351,110 +326,35 @@ def send_telegram_alert(results_top, source="Scanner", mode=""):
 #  DATA ENGINE — DATASECTORS
 # ════════════════════════════════════════════════════
 @st.cache_data(ttl=900)
-def fetch_ohlcv_ds_cached(ticker, interval="15m", limit=200):
-    """
-    DataSectors Chart Saham — CONFIRMED WORKS!
-    Endpoint: GET /api/chart-saham/{symbol}/{timeframe}/latest
-    Response: data.data.data.chartbit = array of OHLCV
-    """
-    t = ticker.replace(".JK","").upper().strip()
-    # Valid TF dari error: "daily"|"1m"|"5m"|"10m"|"15m"|"30m"|"4h" dll
-    tf_map = {
-        "15":"15m","15m":"15m",
-        "1h":"1h","60m":"1h","4h":"4h",
-        "1d":"daily","d":"daily","daily":"daily",
-        "1":"1m","5":"5m","10":"10m","30":"30m",
-        "5m":"5m","10m":"10m","30m":"30m",
-    }
-    tf = tf_map.get(str(interval).lower(), "15m")
-
-    # /latest endpoint — works tanpa params!
-    url = f"https://api.datasectors.com/api/chart-saham/{t}/{tf}/latest"
-
+def fetch_ohlcv_ds_cached(ticker, interval="15m", limit=120):
     try:
-        r = requests.get(url, headers=DS_HEADERS, timeout=15)
-
-        if r.status_code == 401:
-            print(f"[DS] 401 {t} — API key invalid!")
-            return None
-        if r.status_code != 200:
-            print(f"[DS] {r.status_code} {t}/{tf}: {r.text[:80]}")
-            return None
-
-        data = r.json()
-
-        # Response: {"success":true,"data":{"success":true,"data":{"message":"...","data":{"chartbit":[...]}}}}
-        # Structure: data -> data -> data -> chartbit
-        rows = None
-        def find_chartbit(obj, depth=0):
-            """Cari chartbit di nested dict manapun."""
-            if depth > 6: return None
-            if isinstance(obj, dict):
-                if "chartbit" in obj: return obj["chartbit"]
-                for v in obj.values():
-                    r = find_chartbit(v, depth+1)
-                    if r: return r
-            return None
-        rows = find_chartbit(data)
-
-        if not rows:
-            print(f"[DS] No chartbit data for {t}/{tf}")
-            return None
-
-        # Ambil limit bars terakhir
-        if len(rows) > limit:
-            rows = rows[-limit:]
-
+        r = requests.post(f"{DS_BASE}/chart/ohlcv",
+            json={"symbol": ticker, "interval": interval, "limit": limit},
+            headers=DS_HEADERS, timeout=10)
+        if r.status_code != 200: return None
+        d = r.json()
+        if not d.get("success"): return None
+        rows = d.get("data", [])
+        if not rows: return None
         df = pd.DataFrame(rows)
-
-        # DataSectors pakai kolom: open,high,low,close,volume,datetime
-        rename = {
-            'open':'Open','high':'High','low':'Low',
-            'close':'Close','volume':'Volume',
-            'datetime':'Timestamp','time':'Timestamp',
-            't':'Timestamp',
-            # Note: 'date' dibiarkan untuk daily (handle di datetime parsing)
-        }
-        df.rename(columns={k:v for k,v in rename.items() if k in df.columns}, inplace=True)
-
-        for col in ["Open","High","Low","Close","Volume"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # Parse datetime
-        # 15m: kolom 'datetime' = "2026-04-22 09:00:00"
-        # daily: kolom 'date' atau 'unixdate'
+        df.columns = [c.title() for c in df.columns]
         if "Timestamp" in df.columns:
-            df["Datetime"] = pd.to_datetime(df["Timestamp"], errors='coerce')
-            if df["Datetime"].isna().all():
-                df["Datetime"] = pd.to_datetime(df["Timestamp"], unit='s', errors='coerce')
+            df["Datetime"] = pd.to_datetime(df["Timestamp"], unit="s", errors="coerce")
             df = df.set_index("Datetime")
-        elif "date" in df.columns:
-            df["Datetime"] = pd.to_datetime(df["date"], errors='coerce')
-            df = df.set_index("Datetime")
-        elif "unixdate" in df.columns:
-            df["Datetime"] = pd.to_datetime(df["unixdate"], unit='s', errors='coerce')
-            df = df.set_index("Datetime")
-
+        for col in ["Open","High","Low","Close","Volume"]:
+            if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.dropna(subset=["Close"])
-        return df if len(df) >= 10 else None
+        return df if len(df) >= 20 else None
+    except: return None
 
-    except Exception as e:
-        print(f"[DS] Exception {t}: {e}")
-        return None
-
-
-def fetch_intraday(tickers_yf, interval="15m"):
-    """Fetch OHLCV dari DataSectors — /api/chart-saham/{symbol}/{timeframe}"""
+def fetch_intraday(tickers_yf):
     all_dfs = {}
-    for t_raw in tickers_yf:
-        t = t_raw.replace(".JK","").upper()
-        df = fetch_ohlcv_ds_cached(t, interval, 200)
-        if df is not None and len(df) >= 30:
-            all_dfs[t+".JK"] = df
+    for t in [x.replace(".JK","") for x in tickers_yf]:
+        df = fetch_ohlcv_ds_cached(t, "15m", 120)
+        if df is not None and len(df) >= 50:
+            all_dfs[t + ".JK"] = df
         time.sleep(0.05)
     return all_dfs
-
 
 DATA_SOURCE_LABEL = "DataSectors ⚡"
 DATA_SOURCE_COLOR = "#2dd4bf"
@@ -555,11 +455,17 @@ chg_col="#00ff88" if ihsg_chg>=0 else "#ff3d5a"
 chg_sym="▲" if ihsg_chg>=0 else "▼"
 
 # ── STATUS BAR ──
+quota_pct=(st.session_state.ds_calls_today/DS_DAILY_QUOTA*100) if DS_DAILY_QUOTA>0 else 0
+qcol="#00ff88" if quota_pct<60 else("#ffb700" if quota_pct<85 else "#ff3d5a")
 st.markdown(f"""
 <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
   <div style="font-family:Space Mono,monospace;font-size:10px;padding:4px 12px;border-radius:20px;
-       background:rgba(45,212,191,.08);border:1px solid rgba(45,212,191,.3);color:#2dd4bf;">
-    ⚡ DataSectors Live
+       background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.2);color:#00e5ff;">
+    📡 {st.session_state.data_source}
+  </div>
+  <div style="font-family:Space Mono,monospace;font-size:10px;padding:4px 12px;border-radius:20px;
+       background:rgba(0,0,0,.3);border:1px solid #1c2533;color:{qcol};">
+    DataSectors: {st.session_state.ds_calls_today}/{DS_DAILY_QUOTA} calls ({quota_pct:.1f}%)
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -807,7 +713,7 @@ with tab_watchlist:
         wl_run=st.button("🔍 Analisa", use_container_width=True, key="wl_run")
         wl_share=st.button("📋 Copy Hasil", use_container_width=True, key="wl_share")
         wl_tele=st.button("📡 Kirim Telegram", use_container_width=True, key="wl_tele")
-        st.caption("DataSectors Active")
+        st.caption(f"DS calls: {st.session_state.ds_calls_today}/{DS_DAILY_QUOTA}")
 
     if wl_run and wl_input.strip():
         raw_wl=list(dict.fromkeys([t.strip().upper() for line in wl_input.split("\n") for t in line.split(",") if t.strip()]))
