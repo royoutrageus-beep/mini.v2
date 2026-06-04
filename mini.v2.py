@@ -1372,7 +1372,9 @@ with tab_scanner:
                     close=_sff(r.get("Close",0)); vol=_sff(r.get("Volume",0))
                     if close<=0: skip_reasons["price0"]+=1; continue  # skip jika harga invalid
                     ticker_raw=ticker_yf.replace(".JK","").upper()
-                    df_d=daily_dict.get(ticker_yf) or daily_dict.get(ticker_raw)
+                    # FIX: gak boleh pakai `or` untuk DataFrame (ambiguous truth value)
+                    df_d = daily_dict.get(ticker_yf)
+                    if df_d is None: df_d = daily_dict.get(ticker_raw)
                     if df_d is not None and len(df_d)>=2:
                         c1=float(df_d.iloc[-1]["Close"]); c0=float(df_d.iloc[-2]["Close"])
                         gain_pct=(c1-c0)/max(c0,1)*100
