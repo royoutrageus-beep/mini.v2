@@ -1172,7 +1172,7 @@ with tab_scanner:
             else:
                 min_score=st.slider("Min Score (0-6)",0,6,4,key="msc")
                 vol_thresh=st.slider("Min RVOL Spike",1.0,5.0,1.5,0.1,key="vol")
-            min_turn=st.number_input("Min Turnover (M Rp)",value=500,step=100,key="trn")*1_000_000
+            min_turn=st.number_input("Min Turnover (M Rp)",value=100,step=100,key="trn")*1_000_000
         with sc3:
             st.markdown('<div class="settings-label">TAMPILAN</div>',unsafe_allow_html=True)
             view_mode=st.radio("View",["Card View 🃏","Table View 📊"],label_visibility="collapsed",key="vm")
@@ -1234,7 +1234,14 @@ with tab_scanner:
             pb.progress(0.76)
 
             st.session_state.data_dict=data_dict
-            prog_ph.markdown(f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">✅ Data siap: {len(data_dict)} saham (target: {len(ticker_list)})</div>',unsafe_allow_html=True)
+            n_ds   = sum(1 for t in data_dict if hasattr(data_dict[t], "columns") and "FBuy" in data_dict[t].columns)
+            n_yf   = len(data_dict) - n_ds
+            src_lbl= f"DS:{n_ds} + yF:{n_yf}" if DS_KEY else f"yFinance:{n_yf}"
+            status_color = "#00ff88" if len(data_dict)>0 else "#ff3d5a"
+            prog_ph.markdown(f'<div style="color:{status_color};font-family:Space Mono,monospace;font-size:11px;">{"✅" if len(data_dict)>0 else "⚠️"} Data siap: <b>{len(data_dict)}</b> saham dari {len(ticker_list)} target [{src_lbl}]</div>',unsafe_allow_html=True)
+            if len(data_dict)==0:
+                st.error("⚠️ 0 saham berhasil di-fetch! Kemungkinan penyebab:\n- yFinance timeout / rate limit → coba lagi dalam 30 detik\n- Tidak ada koneksi internet\n- Semua ticker tidak dikenali")
+                st.stop()
             pb.progress(0.78)
 
             # ─ Step 4: Daily context — DS dulu, yFinance fallback parallel ─
@@ -1280,15 +1287,21 @@ with tab_scanner:
                     if df_d is not None and len(df_d)>=2:
                         c1=float(df_d.iloc[-1]["Close"]); c0=float(df_d.iloc[-2]["Close"])
                         gain_pct=(c1-c0)/max(c0,1)*100
-                        turnover=c1*float(df_d.iloc[-1]["Volume"])
+                        d_vol=float(df_d.iloc[-1]["Volume"])
+                        if d_vol > 0:
+                            turnover=c1*d_vol  # daily volume normal
+                        else:
+                            # daily vol=0 (weekend/sebelum open) → 15m vol sum fallback
+                            turnover=close*float(df["Volume"].fillna(0).sum())
                     else:
                         try:
-                            today=df.index[-1].date(); df_today=df[df.index.date==today]
-                            turnover=close*df_today["Volume"].sum()
+                            # Fallback: sum semua 15m volume (aman tanpa timezone issue)
+                            turnover=close*float(df["Volume"].fillna(0).sum())
                             gain_pct=float(r.get("ROC3",0))*100
                         except:
-                            turnover=close*vol; gain_pct=float(r.get("ROC3",0))*100
-                    rvol=float(r["RVOL"])
+                            turnover=close*max(vol,0); gain_pct=float(r.get("ROC3",0))*100
+                    rvol_raw=float(r["RVOL"]) if not np.isnan(float(r["RVOL"])) else 1.0
+                    rvol=rvol_raw
                     if turnover<min_turn or rvol<vol_thresh: continue
                     if scan_mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p,p2)
                     elif scan_mode=="Momentum 🚀": sc,reasons,_=score_momentum(r,p,p2)
@@ -1358,6 +1371,19 @@ with tab_scanner:
             st.session_state.last_scan_time=now_jkt.timestamp()
             _tt_save(results,st.session_state.last_scan_time)
             st.session_state.last_scan_mode=scan_mode
+            # Debug info kalau hasil kosong
+            if not results:
+                n_data = len(data_dict)
+                st.warning(
+                    f"⚠️ Scan selesai tapi 0 sinyal lolos dari {n_data} saham yang di-fetch.\n\n"
+                    f"**Coba turunkan filter:**\n"
+                    f"- Min Score → 1\n"
+                    f"- Min Turnover → 0\n"
+                    f"- Min RVOL → 0\n\n"
+                    f"Atau coba mode scan berbeda (Scalping / Momentum / Reversal)."
+                )
+            else:
+                st.success(f"✅ {len(results)} sinyal ditemukan dari {len(data_dict)} saham!")
             if tele_on and results:
                 if "tt_last_sent" not in st.session_state: st.session_state.tt_last_sent=set()
                 dft=pd.DataFrame(results).sort_values("Score",ascending=False)
@@ -1383,10 +1409,14 @@ with tab_scanner:
     lm=st.session_state.get("last_scan_mode","")
     if not results and not do_scan_btn and not auto_trigger:
         st.markdown(f"""<div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;">
-          <div style="font-size:36px;margin-bottom:12px;">🔥</div>
+          <div style="font-size:36px;margin-bottom:12px;">⚡</div>
           <div style="font-size:13px;letter-spacing:2px;">KLIK SCAN UNTUK MULAI</div>
           <div style="font-size:10px;margin-top:8px;color:#2d3748;">
             {"⚡ Quick: 200 saham" if quick_mode else f"Full: {len(raw_stocks)} saham"} · Regime: {regime} · {rcfg["mode"]}
+          </div>
+          <div style="font-size:10px;margin-top:12px;color:#2d3748;padding:8px;background:#0d1117;border-radius:4px;border:1px solid #1c2533;">
+            ⓘ Hasil scan tidak tersimpan setelah page reload. Klik SCAN lagi.
+          </div>
           </div>
         </div>""", unsafe_allow_html=True)
 
