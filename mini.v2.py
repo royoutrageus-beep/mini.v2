@@ -162,18 +162,30 @@ def fetch_ds_ohlcv(ticker, interval="15m", limit=200, force_fresh=False):
 #  random.shuffle + delay = sopan ke Yahoo ✅
 # ════════════════════════════════════════════════════
 def _fetch_yf_ticker(ticker_yf, period="7d", interval="15m"):
-    """Single ticker via Ticker().history() — chart API, no rate limit."""
+    """Single ticker via Ticker().history() — chart API, no rate limit.
+    Robust: no timeout param (compat), relaxed volume filter.
+    """
     try:
         t  = yf.Ticker(ticker_yf)
-        df = t.history(period=period, interval=interval, auto_adjust=True, timeout=15)
+        # Jangan pakai timeout= (beberapa versi yfinance tidak support)
+        df = t.history(period=period, interval=interval, auto_adjust=True)
         if df is None or df.empty: return None
+        # Normalize columns — yfinance kadang uppercase, kadang tidak
         df.columns = [c.capitalize() for c in df.columns]
+        # Rename jika ada nama alternatif
+        rename_map = {"Adj close":"Close","Adj_close":"Close"}
+        df = df.rename(columns=rename_map)
         req = ["Open","High","Low","Close","Volume"]
-        if any(c not in df.columns for c in req): return None
-        df = df[req].dropna(subset=["Close"])
-        df = df[df["Volume"] > 0]
+        missing = [c for c in req if c not in df.columns]
+        if missing: return None
+        df = df[req].copy()
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+        df = df.dropna(subset=["Close"])
+        df = df[df["Close"] > 0]  # filter harga 0, bukan volume (IDX OK)
         return df if len(df) >= 2 else None
-    except: return None
+    except Exception as e:
+        return None
 
 def _fetch_yf_parallel(tickers_yf, period="7d", interval="15m", workers=6, delay=(0.1,0.4)):
     """Parallel fetch — workers=6 + random shuffle + delay = no rate limit."""
@@ -883,19 +895,28 @@ def fetch_intraday(tickers, interval="15m"):
         if cached is not None: all_dfs[t]=cached; continue
         need_fetch.append(t)
     if not need_fetch: return all_dfs
-    # Step 2: DS parallel (10 threads)
-    def _fetch_one(t):
-        raw_t=t.replace(".JK","").upper()
-        df=fetch_ds_ohlcv(raw_t, interval, 200, True)
-        return t, df
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        futs={ex.submit(_fetch_one,t):t for t in need_fetch}
-        for f in as_completed(futs):
-            try:
-                t,df=f.result(timeout=15)
-                if df is not None and len(df)>=20:
-                    all_dfs[t]=df
-            except: pass
+    # Step 2: DS parallel (10 threads) — kalau DS_KEY ada
+    if DS_KEY:
+        def _fetch_one(t):
+            raw_t=t.replace(".JK","").upper()
+            df=fetch_ds_ohlcv(raw_t, interval, 200, True)
+            return t, df
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            futs={ex.submit(_fetch_one,t):t for t in need_fetch}
+            for f in as_completed(futs):
+                try:
+                    t,df=f.result(timeout=20)
+                    if df is not None and len(df)>=20:
+                        all_dfs[t]=df
+                except: pass
+    # Step 3: yFinance fallback — Ticker().history() parallel, no rate limit!
+    # Jalan untuk semua ticker yang masih missing (DS gagal atau DS_KEY kosong)
+    missing_yf=[t for t in need_fetch if t not in all_dfs]
+    if missing_yf:
+        yf_data=_fetch_yf_parallel(missing_yf, "7d", interval, workers=5)
+        for t_yf,df_yf in yf_data.items():
+            if df_yf is not None and len(df_yf)>=20:
+                all_dfs[t_yf]=df_yf
     return all_dfs
 
 def send_telegram(results_top, source="Scanner"):
@@ -1080,7 +1101,7 @@ with tab_scanner:
                 pb.progress(0.85+(i+1)/max(len(tickers),1)*0.14)
                 try:
                     df=data_dict[ticker_yf].copy()
-                    if len(df)<55: continue
+                    if len(df)<30: continue
                     df=apply_intraday_indicators(df)
                     r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3] if len(df)>=3 else p
                     close=float(r["Close"]); vol=float(r["Volume"])
@@ -1365,9 +1386,9 @@ with tab_watchlist:
                     if DS_KEY: df=fetch_ds_ohlcv(t,"15m",200,wl_force)
                     if df is None:
                         # yFinance fallback — Ticker().history(), no rate limit!
-                        df=_fetch_yf_ticker(t+".JK","5d","15m")
+                        df=_fetch_yf_ticker(t+".JK","7d","15m")
                 except: pass
-                if df is None or len(df)<55:
+                if df is None or len(df)<30:
                     wl_res.append({"Ticker":t,"Price":0,"Score":0,"Signal":"No data","Trend":"-",
                         "RSI-EMA":0,"Stoch K":0,"RVOL":0,"BB%":0,"ROC 3B%":0,
                         "VWAP":0,"TP":0,"SL":0,"R:R":0,"ATR":0,"Reasons":"No data","_class":"","MACD Hist":0}); continue
@@ -1467,7 +1488,7 @@ with tab_bsjp:
             pb_bsjp.progress((i+1)/max(len(tbs),1))
             try:
                 df=scan_data[ty].copy()
-                if len(df)<55: continue
+                if len(df)<30: continue
                 df2=apply_intraday_indicators(df)
                 r=df2.iloc[-1]; p=df2.iloc[-2]; p2=df2.iloc[-3] if len(df2)>=3 else p
                 close=float(r["Close"]); vol=float(r["Volume"]); to=close*vol; rv=float(r["RVOL"])
