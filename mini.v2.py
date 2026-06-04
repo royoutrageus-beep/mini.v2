@@ -1,3 +1,4 @@
+import math
 import yfinance as yf
 import pandas as pd
 import streamlit as st
@@ -201,6 +202,175 @@ def _fetch_yf_parallel(tickers_yf, period="7d", interval="15m", workers=6, delay
     return results
 
 # ════════════════════════════════════════════════════
+#  IDX QUANT — 151 TRADING STRATEGIES ENGINE
+#  Kakushadze & Serur (2018)
+#  Analisa DAILY untuk konfirmasi makro direction
+#  Combined dengan TT 15m untuk timing entry presisi
+# ════════════════════════════════════════════════════
+
+def _iq_sma(prices, n):
+    if len(prices) < n: return None
+    return round(sum(prices[-n:]) / n, 2)
+
+def _iq_ema(prices, n):
+    if len(prices) < n: return None
+    k = 2 / (n + 1); e = prices[-n]
+    for x in prices[-n+1:]: e = x * k + e * (1 - k)
+    return round(e, 2)
+
+def _iq_rsi(prices, n=14):
+    """Simple RSI untuk daily data — Strategy 3.14 ref."""
+    if len(prices) < n + 1: return None
+    deltas = [prices[i+1]-prices[i] for i in range(len(prices)-1)]
+    gains = [d for d in deltas[-n:] if d > 0]
+    losses = [-d for d in deltas[-n:] if d < 0]
+    ag = sum(gains)/n if gains else 0
+    al = sum(losses)/n if losses else 1e-9
+    return round(100 - 100/(1 + ag/al), 1)
+
+def _iq_momentum(prices):
+    """Strategy 3.1 — Price Momentum: 1M/3M/6M returns."""
+    n = len(prices); score = 50; signals = []
+    if n >= 20:
+        r = (prices[-1]-prices[-20])/prices[-20]*100
+        score += 15 if r > 5 else -15 if r < -5 else 0
+        signals.append(f"1M: {r:+.1f}%")
+    if n >= 60:
+        r = (prices[-1]-prices[-60])/prices[-60]*100
+        score += 12 if r > 10 else -12 if r < -10 else 0
+        signals.append(f"3M: {r:+.1f}%")
+    if n >= 120:
+        r = (prices[-1]-prices[-120])/prices[-120]*100
+        score += 10 if r > 20 else -10 if r < -15 else 0
+        signals.append(f"6M: {r:+.1f}%")
+    return {"score": min(100, max(0, score)), "signals": signals}
+
+def _iq_ma_signal(prices):
+    """Strategy 3.11/3.12/3.13 — EMA5/13/34 + SMA20/50 stack."""
+    e5=_iq_ema(prices,5); e13=_iq_ema(prices,13); e34=_iq_ema(prices,34)
+    s20=_iq_sma(prices,20); s50=_iq_sma(prices,50)
+    score=50; label="MIXED"; signals=[]
+    if e5 and e13:
+        if e5>e13: score+=15; signals.append("EMA5>13 ✓")
+        else: score-=15; signals.append("EMA5<13 ✗")
+    if e13 and e34:
+        if e13>e34: score+=12; signals.append("EMA13>34 ✓")
+        else: score-=12
+    if s20 and s50:
+        if s20>s50: score+=8; signals.append("SMA20>50 ✓")
+        else: score-=8
+    if e5 and e13 and e34:
+        if e5>e13>e34:   label="BULLISH"
+        elif e5<e13<e34: label="BEARISH"
+    return {"score":min(100,max(0,score)),"label":label,"e5":e5,"e13":e13,"e34":e34,
+            "s20":s20,"s50":s50,"signals":signals}
+
+def _iq_bagger(momentum_score, ma_score, ma_label, vol_ann, prices):
+    """Strategy 3.7 + 3.3 — Bagger: near 52W low + dry vol + momentum."""
+    score=0; signals=[]
+    score += momentum_score/100*40
+    if momentum_score>=60: signals.append("✓ Momentum kuat (3.1)")
+    score += ma_score/100*25
+    if ma_label=="BULLISH": signals.append("✓ MA stack bullish (3.12/3.13)")
+    if vol_ann:
+        if 25<=vol_ann<=70: score+=20; signals.append(f"✓ Vol {vol_ann}% sweet spot")
+        elif vol_ann<25: score+=10
+        else: score+=5
+    n=len(prices)
+    if n>=60:
+        h=max(prices[-min(252,n):]); l=min(prices[-min(252,n):]); cur=prices[-1]
+        rng=h-l
+        if rng>0:
+            pct=(cur-l)/rng*100
+            if pct<35:   score+=15; signals.append(f"✓ Near 52W low {pct:.0f}% (3.3)")
+            elif pct<55: score+=8
+    return {"score":round(min(100,score),1),"signals":signals}
+
+def _iq_pivot_daily(df_d):
+    """Strategy 3.14 — Daily Pivot Point (H+L+C)/3."""
+    try:
+        if df_d is None or len(df_d)<2: return {}
+        prev=df_d.iloc[-2]
+        h=float(prev["High"]); l=float(prev["Low"]); c=float(prev["Close"])
+        pp=(h+l+c)/3; r1=2*pp-l; r2=pp+(h-l); s1=2*pp-h; s2=pp-(h-l)
+        cur=float(df_d.iloc[-1]["Close"])
+        return {"pp":round(pp),"r1":round(r1),"r2":round(r2),"s1":round(s1),"s2":round(s2),
+                "above":cur>pp,"dist_r1":round((r1-cur)/cur*100,2)}
+    except: return {}
+
+def iq_analyze(df_daily):
+    """
+    Jalankan analisa IDX Quant 151 Strategies pada daily DataFrame.
+    Returns dict dengan iq_score, iq_verdict, iq_ma, iq_bagger, dll.
+    """
+    empty = {"iq_score":0,"iq_verdict":"UNKNOWN","iq_mom":0,"iq_ma":"—",
+             "iq_bagger":0,"iq_rsi":None,"iq_pivot":{},"iq_signals":[]}
+    if df_daily is None or len(df_daily) < 10: return empty
+    try:
+        prices  = [float(x) for x in df_daily["Close"].tolist() if x>0]
+        if len(prices) < 10: return empty
+
+        # Volatility annualized
+        vol_ann = None
+        if len(prices) >= 21:
+            rets = [(prices[i+1]-prices[i])/prices[i] for i in range(len(prices)-21,len(prices)-1)]
+            mn = sum(rets)/len(rets)
+            var = sum((r-mn)**2 for r in rets)/(len(rets)-1) if len(rets)>1 else 0
+            vol_ann = round(math.sqrt(var)*math.sqrt(252)*100, 1) if var>0 else None
+
+        mom = _iq_momentum(prices)
+        ma  = _iq_ma_signal(prices)
+        bag = _iq_bagger(mom["score"], ma["score"], ma["label"], vol_ann, prices)
+        rsi = _iq_rsi(prices)
+        pv  = _iq_pivot_daily(df_daily)
+
+        # Composite score: Momentum 40% + MA 35% + Bagger 25%
+        comp = round(mom["score"]*0.40 + ma["score"]*0.35 + bag["score"]*0.25, 1)
+        verdict = "BUY" if comp>=65 else "HOLD" if comp>=45 else "WAIT"
+
+        all_signals = mom["signals"] + ma["signals"][:2] + bag["signals"][:2]
+
+        return {"iq_score":comp,"iq_verdict":verdict,"iq_mom":mom["score"],
+                "iq_ma":ma["label"],"iq_bagger":bag["score"],"iq_rsi":rsi,
+                "iq_pivot":pv,"iq_vol_ann":vol_ann,"iq_signals":all_signals,
+                "iq_e5":ma["e5"],"iq_e13":ma["e13"],"iq_e34":ma["e34"]}
+    except: return empty
+
+def calc_mesin_grade(tt_score, tt_signal, iq_score, iq_verdict, iq_bagger):
+    """
+    ════ MESIN PRESISI GRADE ════
+    Gabungan TT 15m (timing) + IQ daily (direction).
+    Keduanya agree = high conviction signal.
+
+    PRESISI 🎯  = TT GACOR/REVERSAL + IQ BUY        → strong entry NOW
+    KUAT ⚡     = TT POTENSIAL + IQ BUY, atau TT GACOR + IQ HOLD
+    BAGGER 💎   = TT BAGGER/KANDIDAT + IQ Bagger ≥ 60 → accumulation
+    BANDAR 🔵   = TT BANDAR/HAKA/SUPER + IQ BUY      → smart money confirm
+    MONITOR 👁️  = salah satu bullish, satunya netral
+    WAIT ❌     = tidak ada alignment
+    """
+    is_tt_strong  = any(k in tt_signal for k in ["GACOR","REVERSAL"])
+    is_tt_smart   = any(k in tt_signal for k in ["BANDAR","HAKA","SUPER"])
+    is_tt_bag     = any(k in tt_signal for k in ["BAGGER","KANDIDAT"])
+    is_tt_mod     = any(k in tt_signal for k in ["POTENSIAL","REBOUND","AKUM"])
+    is_iq_buy     = iq_verdict == "BUY"
+    is_iq_hold    = iq_verdict == "HOLD"
+
+    if is_tt_smart and is_iq_buy:
+        return "BANDAR 🔵", "#4da6ff", min(100, tt_score/6*50 + iq_score/100*50 + 22)
+    if is_tt_strong and is_iq_buy:
+        return "PRESISI 🎯", "#00ff88", min(100, tt_score/6*50 + iq_score/100*50 + 20)
+    if is_tt_bag and iq_bagger >= 60:
+        return "BAGGER 💎", "#bf5fff", min(100, tt_score/6*50 + iq_score/100*50 + 18)
+    if is_tt_mod and is_iq_buy:
+        return "KUAT ⚡", "#ffb700", min(100, tt_score/6*50 + iq_score/100*50 + 10)
+    if is_tt_strong and is_iq_hold:
+        return "KUAT ⚡", "#ffb700", min(100, tt_score/6*50 + iq_score/100*50 + 8)
+    if is_iq_buy and (is_tt_strong or is_tt_mod):
+        return "MONITOR 👁️", "#00e5ff", tt_score/6*50 + iq_score/100*50
+    return "WAIT ❌", "#ff3d5a", max(0, tt_score/6*50 + iq_score/100*50 - 10)
+
+# ════════════════════════════════════════════════════
 #  SESSION STATE + DISK PERSISTENCE
 # ════════════════════════════════════════════════════
 _TT_RESULTS_FILE = CACHE_DIR / "tt_last_results.pkl"
@@ -232,7 +402,7 @@ if not st.session_state.scan_results:
         st.session_state.scan_results = _tt_saved["results"]
         st.session_state.last_scan_time = _tt_saved["ts"]
 
-st.set_page_config(layout="wide", page_title="Theta Turbo v5", page_icon="🔥", initial_sidebar_state="collapsed")
+st.set_page_config(layout="wide", page_title="Mesin Presisi v1.0", page_icon="⚡", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -959,8 +1129,8 @@ chg_col="#00ff88" if ihsg_chg>=0 else "#ff3d5a"; chg_sym="▲" if ihsg_chg>=0 el
 now_jkt=datetime.now(jakarta_tz); is_open=9<=now_jkt.hour<16
 
 st.markdown(f"""<div class="tt-header">
-  <div><div class="tt-logo">🔥 THETA TURBO</div>
-  <div class="tt-sub">Intraday 15M · Auto Regime · v5.2 DS · Zero Rate Limit ✅</div></div>
+  <div><div class="tt-logo">⚡ MESIN PRESISI</div>
+  <div class="tt-sub">TT 15M × IDX Quant Daily (151 Strategies) · v1.0 · Zero Rate Limit ✅</div></div>
   <div class="live-badge"><div class="live-dot"></div>
     {"⚡ DataSectors" if DS_KEY else "📊 yFinance"} · LIVE {now_jkt.strftime("%H:%M:%S")} WIB
   </div>
@@ -1150,6 +1320,12 @@ with tab_scanner:
                     else:                     fdir="⚪ MIX";   fc_="#888888"
                     lwick=_sf(r.get("LWick",0))
                     vb=turnover/1e9; val_str=f"{vb:.1f}B" if vb>=1 else f"{round(vb*1000,0):.0f}M"
+
+                    # ── IDX QUANT 151 STRATEGIES — daily analysis ──────────
+                    iq = iq_analyze(df_d)  # df_d already fetched above
+                    mg, mg_col, ms = calc_mesin_grade(
+                        sc, sig+"|"+sig_v2, iq["iq_score"], iq["iq_verdict"], iq["iq_bagger"])
+
                     results.append({
                         "Ticker":stock_map.get(ticker_yf,ticker_raw),"Price":int(close),"Score":sc,
                         "Signal":sig,"Sinyal_v2":sig_v2,"Aksi_v2":aksi_v2,
@@ -1164,6 +1340,17 @@ with tab_scanner:
                         "LWick":round(lwick,1),"FDir":fdir,"FC":fc_,
                         "FNet3":int(fnet3),"FNet8":int(fnet8),"FRatio":round(fratio,2),
                         "sc_v2":sc_v2,"gc_now":gc_now,
+                        # ── IDX QUANT fields ──
+                        "IQ_Score":round(iq["iq_score"],1),
+                        "IQ_Verdict":iq["iq_verdict"],
+                        "IQ_MA":iq["iq_ma"],
+                        "IQ_Mom":iq["iq_mom"],
+                        "IQ_Bagger":iq["iq_bagger"],
+                        "IQ_RSI":iq["iq_rsi"],
+                        # ── MESIN PRESISI grade ──
+                        "Mesin_Grade":mg,
+                        "Mesin_Color":mg_col,
+                        "Mesin_Score":round(ms,1),
                     })
                 except: continue
             pb.progress(1.0); prog_ph.empty(); pb.empty()
@@ -1204,16 +1391,23 @@ with tab_scanner:
         </div>""", unsafe_allow_html=True)
 
     elif results:
-        df_out=pd.DataFrame(results).sort_values("Score",ascending=False).reset_index(drop=True)
-        gacor=df_out[df_out["Signal"].str.contains("GACOR|REVERSAL|HAKA|SUPER|BANDAR",na=False)]
-        bagger=df_out[df_out["Signal"].str.contains("BAGGER|KANDIDAT",na=False)]
+        df_out=pd.DataFrame(results).sort_values("Mesin_Score",ascending=False).reset_index(drop=True)
+        gacor  =df_out[df_out["Signal"].str.contains("GACOR|REVERSAL|HAKA|SUPER|BANDAR",na=False)]
+        bagger =df_out[df_out["Signal"].str.contains("BAGGER|KANDIDAT",na=False)]
         potensi=df_out[df_out["Signal"].str.contains("POTENSIAL|REBOUND|AKUM",na=False)]
         avg_rsi=df_out["RSI-EMA"].mean()
         asing_b_list=df_out[df_out["FDir"]=="🔵 BELI"]["Ticker"].tolist() if "FDir" in df_out.columns else []
         asing_j_list=df_out[df_out["FDir"]=="🔴 JUAL"]["Ticker"].tolist() if "FDir" in df_out.columns else []
-        bandar_list=df_out[df_out["Signal"].str.contains("BANDAR",na=False)]["Ticker"].tolist() if "Signal" in df_out.columns else []
+        bandar_list =df_out[df_out["Signal"].str.contains("BANDAR",na=False)]["Ticker"].tolist() if "Signal" in df_out.columns else []
+        _mgcol = df_out["Mesin_Grade"].astype(str) if "Mesin_Grade" in df_out.columns else pd.Series([""] * len(df_out))
+        presisi_list =df_out[_mgcol.str.contains("PRESISI",na=False)]["Ticker"].tolist()
+        bandar_m_list=df_out[_mgcol.str.contains("BANDAR",na=False)]["Ticker"].tolist()
+        kuat_list    =df_out[_mgcol.str.contains("KUAT",na=False)]["Ticker"].tolist()
+        bagger_m_list=df_out[_mgcol.str.contains("BAGGER",na=False)]["Ticker"].tolist()
+        iq_buy_cnt   =len(df_out[df_out["IQ_Verdict"]=="BUY"]) if "IQ_Verdict" in df_out.columns else 0
         bandar_cnt=len(bandar_list); asing_beli=len(asing_b_list); asing_jual=len(asing_j_list)
 
+        rsi_color_avg = "#00ff88" if avg_rsi>50 else "#ffb700" if avg_rsi>35 else "#ff3d5a"
         st.markdown(f"""<div class="metric-row">
           <div class="metric-card" style="border-top-color:{rcolor}"><div class="metric-label">Regime</div>
             <div class="metric-value" style="font-size:16px;color:{rcolor}">{regime}</div>
@@ -1229,45 +1423,91 @@ with tab_scanner:
           <div class="metric-card amber"><div class="metric-label">POTENSIAL</div>
             <div class="metric-value">{len(potensi)}</div></div>
           <div class="metric-card"><div class="metric-label">Avg RSI-EMA</div>
-            <div class="metric-value" style="color:{"#00ff88" if avg_rsi>50 else "#ffb700" if avg_rsi>35 else "#ff3d5a"}">{avg_rsi:.1f}</div></div>
+            <div class="metric-value" style="color:{rsi_color_avg}">{avg_rsi:.1f}</div></div>
         </div>""", unsafe_allow_html=True)
 
+        presisi_str  = ", ".join(presisi_list[:4])  or "—"
+        bandar_m_str = ", ".join(bandar_m_list[:4]) or "—"
+        bagger_m_str = ", ".join(bagger_m_list[:4]) or "—"
+        kuat_str     = ", ".join(kuat_list[:4])     or "—"
+        st.markdown(f"""
+<div style="background:linear-gradient(135deg,rgba(0,255,136,.04),rgba(191,95,255,.04));border:1px solid rgba(0,255,136,.25);border-radius:10px;padding:12px 16px;margin-bottom:12px;">
+  <div style="font-family:Space Mono,monospace;font-size:11px;font-weight:700;color:#00ff88;letter-spacing:2px;margin-bottom:10px;">
+    MESIN PRESISI v1.0 — 15M x DAILY ALIGNMENT (151 Strategies)
+  </div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;">
+    <div style="background:rgba(0,255,136,.07);border:1px solid rgba(0,255,136,.3);border-radius:6px;padding:8px 14px;min-width:100px">
+      <div style="font-family:Space Mono,monospace;font-size:9px;color:#00ff88;letter-spacing:1px">PRESISI</div>
+      <div style="font-family:Space Mono,monospace;font-size:22px;font-weight:700;color:#00ff88">{len(presisi_list)}</div>
+      <div style="font-size:9px;color:#4a5568">{presisi_str}</div>
+    </div>
+    <div style="background:rgba(77,166,255,.07);border:1px solid rgba(77,166,255,.3);border-radius:6px;padding:8px 14px;min-width:100px">
+      <div style="font-family:Space Mono,monospace;font-size:9px;color:#4da6ff;letter-spacing:1px">BANDAR PRESISI</div>
+      <div style="font-family:Space Mono,monospace;font-size:22px;font-weight:700;color:#4da6ff">{len(bandar_m_list)}</div>
+      <div style="font-size:9px;color:#4a5568">{bandar_m_str}</div>
+    </div>
+    <div style="background:rgba(191,95,255,.07);border:1px solid rgba(191,95,255,.3);border-radius:6px;padding:8px 14px;min-width:100px">
+      <div style="font-family:Space Mono,monospace;font-size:9px;color:#bf5fff;letter-spacing:1px">BAGGER PRESISI</div>
+      <div style="font-family:Space Mono,monospace;font-size:22px;font-weight:700;color:#bf5fff">{len(bagger_m_list)}</div>
+      <div style="font-size:9px;color:#4a5568">{bagger_m_str}</div>
+    </div>
+    <div style="background:rgba(255,183,0,.07);border:1px solid rgba(255,183,0,.3);border-radius:6px;padding:8px 14px;min-width:100px">
+      <div style="font-family:Space Mono,monospace;font-size:9px;color:#ffb700;letter-spacing:1px">KUAT</div>
+      <div style="font-family:Space Mono,monospace;font-size:22px;font-weight:700;color:#ffb700">{len(kuat_list)}</div>
+      <div style="font-size:9px;color:#4a5568">{kuat_str}</div>
+    </div>
+    <div style="background:rgba(0,0,0,.2);border:1px solid #1c2533;border-radius:6px;padding:8px 14px;min-width:100px">
+      <div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568;letter-spacing:1px">IQ BUY Daily</div>
+      <div style="font-family:Space Mono,monospace;font-size:22px;font-weight:700;color:#2dd4bf">{iq_buy_cnt}</div>
+      <div style="font-size:9px;color:#4a5568">151 Strategies</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
         if DS_KEY:
+            bandar_str  = ", ".join(bandar_list[:5])   or "—"
+            asing_b_str = ", ".join(asing_b_list[:5])  or "—"
+            asing_j_str = ", ".join(asing_j_list[:5])  or "—"
             st.markdown(f"""<div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap">
-  <div style="background:#0d1a2e;border:1px solid #4da6ff44;border-radius:8px;padding:8px 14px;flex:1;min-width:120px">
-    <div style="font-family:Space Mono,monospace;font-size:9px;color:#4da6ff;letter-spacing:1px">🔵 BANDAR MASUK</div>
+  <div style="background:#0d1a2e;border:1px solid #4da6ff44;border-radius:8px;padding:8px 14px;flex:1;min-width:100px">
+    <div style="font-family:Space Mono,monospace;font-size:9px;color:#4da6ff;letter-spacing:1px">BANDAR MASUK</div>
     <div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:#4da6ff">{bandar_cnt}</div>
-    <div style="font-size:9px;color:#4a5568">{", ".join(bandar_list[:5]) or "—"}</div>
+    <div style="font-size:9px;color:#4a5568">{bandar_str}</div>
   </div>
-  <div style="background:#0d2010;border:1px solid #00ff8844;border-radius:8px;padding:8px 14px;flex:1;min-width:120px">
-    <div style="font-family:Space Mono,monospace;font-size:9px;color:#00ff88;letter-spacing:1px">🔵 ASING NET BUY</div>
+  <div style="background:#0d2010;border:1px solid #00ff8844;border-radius:8px;padding:8px 14px;flex:1;min-width:100px">
+    <div style="font-family:Space Mono,monospace;font-size:9px;color:#00ff88;letter-spacing:1px">ASING NET BUY</div>
     <div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:#00ff88">{asing_beli}</div>
-    <div style="font-size:9px;color:#4a5568">{", ".join(asing_b_list[:5]) or "—"}</div>
+    <div style="font-size:9px;color:#4a5568">{asing_b_str}</div>
   </div>
-  <div style="background:#200d0d;border:1px solid #ff3d5a44;border-radius:8px;padding:8px 14px;flex:1;min-width:120px">
-    <div style="font-family:Space Mono,monospace;font-size:9px;color:#ff3d5a;letter-spacing:1px">🔴 ASING NET SELL</div>
+  <div style="background:#200d0d;border:1px solid #ff3d5a44;border-radius:8px;padding:8px 14px;flex:1;min-width:100px">
+    <div style="font-family:Space Mono,monospace;font-size:9px;color:#ff3d5a;letter-spacing:1px">ASING NET SELL</div>
     <div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:#ff3d5a">{asing_jual}</div>
-    <div style="font-size:9px;color:#4a5568">{", ".join(asing_j_list[:5]) or "—"}</div>
+    <div style="font-size:9px;color:#4a5568">{asing_j_str}</div>
   </div>
-  <div style="background:#0d1117;border:1px solid #1c2533;border-radius:8px;padding:8px 14px;flex:1;min-width:120px">
-    <div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568;letter-spacing:1px">⚡ DATA SOURCE</div>
-    <div style="font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:#2dd4bf">DataSectors</div>
-    <div style="font-size:9px;color:#4a5568">IDX · FBuy+FSell+OHLCV</div>
+  <div style="background:#0d1117;border:1px solid #1c2533;border-radius:8px;padding:8px 14px;flex:1;min-width:100px">
+    <div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568;letter-spacing:1px">DATA SOURCE</div>
+    <div style="font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:#2dd4bf">DS + yFinance</div>
+    <div style="font-size:9px;color:#4a5568">IDX FBuy+FSell+OHLCV</div>
   </div>
 </div>""", unsafe_allow_html=True)
 
         th='<div class="tape-wrap"><div class="tape-inner">'
         for _,row in df_out.iterrows():
             roc=row["ROC 3B%"]; ib="BAGGER" in row["Signal"] or "KANDIDAT" in row["Signal"]
+            mg2=str(row.get("Mesin_Grade","—"))
             cls="bagger" if ib else("up" if roc>0 else("down" if roc<0 else "flat"))
-            sym="💎" if ib else("▲" if roc>0 else("▼" if roc<0 else "─"))
-            th+=f'<span class="tape-item {cls}">{row["Ticker"]} {int(row["Price"])} {sym}{abs(roc):.1f}% [{row["Signal"]}]</span>'
+            sym="[BAG]" if "BAGGER" in mg2 else("[PRESISI]" if "PRESISI" in mg2 else("[BANDAR]" if "BANDAR" in mg2 else("[KUAT]" if "KUAT" in mg2 else("UP" if roc>0 else "DN"))))
+            th+=f'<span class="tape-item {cls}">{row["Ticker"]} {int(row["Price"])} {sym} IQ:{row.get("IQ_Verdict","?")}</span>'
         th+=th.replace('tape-inner">',''); th+='</div></div>'
         st.markdown(th, unsafe_allow_html=True)
+
+        n_mp = len(presisi_list)+len(bandar_m_list)
+        if n_mp > 0:
+            st.markdown(f'<div class="bagger-alert-box"><div class="bagger-title">MESIN PRESISI ALERT x{n_mp} — 15M + DAILY ALIGNED</div></div>', unsafe_allow_html=True)
         if not bagger.empty:
-            st.markdown(f'<div class="bagger-alert-box"><div class="bagger-title">💎 WYCKOFF BAGGER ALERT · {len(bagger)} KANDIDAT</div></div>',unsafe_allow_html=True)
+            st.markdown(f'<div class="bagger-alert-box"><div class="bagger-title">WYCKOFF BAGGER x{len(bagger)} KANDIDAT</div></div>', unsafe_allow_html=True)
         if not gacor.empty:
-            st.markdown(f'<div class="alert-box"><div class="alert-title">🚨 GACOR ALERT · {len(gacor)} SAHAM · {lm}</div></div>',unsafe_allow_html=True)
+            st.markdown(f'<div class="alert-box"><div class="alert-title">GACOR ALERT x{len(gacor)} SAHAM — {lm}</div></div>', unsafe_allow_html=True)
 
         def tt_aksi_badge(a):
             a=str(a)
@@ -1286,80 +1526,120 @@ with tab_scanner:
                 if k in s: return f'<span style="background:{bg};color:{c};padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid {c}44">{s}</span>'
             return f'<span style="background:#1a1a1a;color:#4a5568;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700">{s}</span>'
 
+        def mesin_badge(mg3):
+            mg3=str(mg3)
+            M2={"PRESISI":("#00ff88","#0a1a10","rgba(0,255,136,.4)"),
+                "BANDAR": ("#4da6ff","#0a1525","rgba(77,166,255,.4)"),
+                "BAGGER": ("#bf5fff","#150a25","rgba(191,95,255,.4)"),
+                "KUAT":   ("#ffb700","#251800","rgba(255,183,0,.4)"),
+                "MONITOR":("#00e5ff","#0a1515","rgba(0,229,255,.3)"),
+                "WAIT":   ("#ff3d5a","#250a0d","rgba(255,61,90,.2)")}
+            for k,(c,bg,brd) in M2.items():
+                if k in mg3: return f'<span style="background:{bg};color:{c};padding:3px 10px;border-radius:4px;font-size:10px;font-weight:700;border:1px solid {brd}">{mg3}</span>'
+            return f'<span style="background:#1a1a1a;color:#4a5568;padding:3px 10px;border-radius:4px;font-size:10px">{mg3}</span>'
+
+        def iq_verdict_badge(v):
+            v=str(v)
+            M3={"BUY":("#22c55e","rgba(34,197,94,.15)","rgba(34,197,94,.4)"),
+                "HOLD":("#8b5cf6","rgba(139,92,246,.15)","rgba(139,92,246,.35)"),
+                "WAIT":("#ef4444","rgba(239,68,68,.1)","rgba(239,68,68,.3)")}
+            c,bg,brd=M3.get(v,("#4a5568","rgba(255,255,255,.05)","rgba(255,255,255,.1)"))
+            return f'<span style="background:{bg};color:{c};padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid {brd}">{v}</span>'
+
         if view_mode=="Card View 🃏":
-            st.markdown('<div class="section-title">Signal Cards</div>',unsafe_allow_html=True)
+            st.markdown('<div class="section-title">Signal Cards — sorted by Mesin Score</div>', unsafe_allow_html=True)
             ch='<div class="signal-grid">'
             for _,row in df_out.head(20).iterrows():
                 si=int(row["Score"]); ib="BAGGER" in row["Signal"] or "KANDIDAT" in row["Signal"]
                 bc="filled-purple" if ib else "filled"
-                bars="".join([f'<div class="sc-bar {bc if i<si else "empty"}" style="width:28px"></div>' for i in range(6)])
+                bars="".join([f'<div class="sc-bar {bc if i<si else "empty"}" style="width:24px"></div>' for i in range(6)])
                 rc="#00ff88" if row["ROC 3B%"]>0 else "#ff3d5a"
-                te="📈" if "▲" in row["Trend"] else("📉" if "▼" in row["Trend"] else "➡️")
+                te="UP" if "UP" in row.get("Trend","") else("DN" if "DN" in row.get("Trend","") else "~")
                 fd=row.get("FDir","—"); fc=row.get("FC","#4a5568")
-                sc2="#bf5fff" if ib else("#00ff88" if si>=5 else "#ffb700" if si>=4 else "#00e5ff")
-                ch+=f'''<div class="signal-card {row["_class"]}">
-                  <div style="display:flex;justify-content:space-between;align-items:flex-start;">
-                    <div><div class="sc-ticker">{row["Ticker"]}</div>
-                    <div class="sc-price" style="color:{rc}">{int(row["Price"]):,} {te}</div></div>
-                    <div style="text-align:right;"><div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">SCORE</div>
-                    <div style="font-family:Space Mono,monospace;font-size:20px;font-weight:700;color:{sc2}">{row["Score"]}</div></div>
-                  </div>
-                  <div class="sc-signal" style="color:{sc2}">{row["Signal"]}</div>
-                  <div class="sc-bars">{bars}</div>
-                  <div class="sc-stats">
-                    <div class="sc-stat">RSI-EMA <span>{row["RSI-EMA"]}</span></div>
-                    <div class="sc-stat">STOCH <span>{row["Stoch K"]:.0f}</span></div>
-                    <div class="sc-stat">RVOL <span>{row["RVOL"]}x</span></div>
-                    <div class="sc-stat">ASING <span style="color:{fc}">{fd}</span></div>
-                  </div>
-                  <div class="sc-stats" style="margin-top:6px;">
-                    <div class="sc-stat">TP <span style="color:#00ff88">{int(row["TP"]):,}</span></div>
-                    <div class="sc-stat">SL <span style="color:#ff3d5a">{int(row["SL"]):,}</span></div>
-                    <div class="sc-stat">R:R <span>{row["R:R"]}</span></div>
-                  </div>
-                  <div style="margin-top:8px;font-size:10px;color:#4a5568;line-height:1.4;font-family:Space Mono,monospace;">{row["Reasons"][:70]}</div>
-                </div>'''
+                mg_v=str(row.get("Mesin_Grade","—")); mg_c=str(row.get("Mesin_Color","#4a5568"))
+                ms_v=float(row.get("Mesin_Score",0))
+                iq_v=str(row.get("IQ_Verdict","—")); iq_s=float(row.get("IQ_Score",0))
+                iq_m=str(row.get("IQ_MA","—"))
+                ch+=(f'<div class="signal-card {row["_class"]}">'
+                     f'<div style="display:flex;justify-content:space-between;align-items:flex-start;">'
+                     f'<div><div class="sc-ticker">{row["Ticker"]}</div>'
+                     f'<div class="sc-price" style="color:{rc}">{int(row["Price"]):,} {te}</div></div>'
+                     f'<div style="text-align:right;">'
+                     f'<div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568">MESIN</div>'
+                     f'<div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:{mg_c}">{ms_v:.0f}</div>'
+                     f'</div></div>'
+                     f'<div style="margin:5px 0">{mesin_badge(mg_v)}</div>'
+                     f'<div class="sc-bars">{bars}</div>'
+                     f'<div style="display:flex;gap:5px;margin:5px 0;flex-wrap:wrap">'
+                     f'<div style="font-family:Space Mono,monospace;font-size:9px;padding:2px 7px;background:rgba(0,0,0,.3);border-radius:4px;color:#00e5ff">TT:{row["Signal"][:10]}</div>'
+                     f'{iq_verdict_badge(iq_v)}'
+                     f'<div style="font-family:Space Mono,monospace;font-size:9px;padding:2px 7px;background:rgba(0,0,0,.3);border-radius:4px;color:#4a5568">IQ:{iq_s:.0f} {iq_m[:4]}</div>'
+                     f'</div>'
+                     f'<div class="sc-stats">'
+                     f'<div class="sc-stat">RSI <span>{row["RSI-EMA"]}</span></div>'
+                     f'<div class="sc-stat">RVOL <span>{row["RVOL"]}x</span></div>'
+                     f'<div class="sc-stat">ASING <span style="color:{fc}">{fd}</span></div>'
+                     f'</div>'
+                     f'<div class="sc-stats" style="margin-top:6px;">'
+                     f'<div class="sc-stat">TP <span style="color:#00ff88">{int(row["TP"]):,}</span></div>'
+                     f'<div class="sc-stat">SL <span style="color:#ff3d5a">{int(row["SL"]):,}</span></div>'
+                     f'<div class="sc-stat">R:R <span>{row["R:R"]}</span></div>'
+                     f'</div>'
+                     f'<div style="margin-top:6px;font-size:9px;color:#4a5568;font-family:Space Mono,monospace">{row["Reasons"][:65]}</div>'
+                     f'</div>')
             ch+='</div>'; st.markdown(ch, unsafe_allow_html=True)
 
-        st.markdown('<div class="section-title">Full Signal Table</div>',unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Full Signal Table — MESIN PRESISI x 151 STRATEGIES</div>', unsafe_allow_html=True)
+        col_headers=["EMITEN","GRADE","MS","AKSI","SINYAL 15M","IQ DAILY","IQ SCORE","IQ MA","IQ BAG","RVOL","GAIN","NOW","TP","SL","PROFIT","RSI","TURNOVER","ASING"]
+        header_html="".join(f'<th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533;white-space:nowrap">{h}</th>' for h in col_headers)
         rows_html=""
         for _,row in df_out.head(50).iterrows():
-            gc="#00ff88" if row.get("ROC 3B%",0)>0 else "#ff3d5a"
-            rsi_v=row.get("RSI-EMA",50)
-            rsi_s="UP" if rsi_v>60 else("DEAD" if rsi_v<35 else("DOWN" if rsi_v<45 else "NEU"))
-            rsi_c="#00ff88" if rsi_v>60 else "#ff3d5a" if rsi_v<35 else "#ff7b00" if rsi_v<45 else "#4a5568"
-            rvol_v=row.get("RVOL",1); rvol_s=f"{rvol_v*100:.0f}%" if rvol_v<10 else f"{rvol_v:.1f}x"
-            fd=row.get("FDir","—"); fc=row.get("FC","#4a5568")
-            sv2=row.get("Sinyal_v2",row.get("Signal","-")); av2=row.get("Aksi_v2","-")
+            roc=row.get("ROC 3B%",0)
+            gc="#00ff88" if roc>0 else "#ff3d5a"
+            rsi_v=float(row.get("RSI-EMA",50))
+            rsi_c="#00ff88" if rsi_v>60 else("#ff3d5a" if rsi_v<35 else("#ff7b00" if rsi_v<45 else "#4a5568"))
+            rvol_s=f"{float(row.get('RVOL',1)):.1f}x"
+            fd=str(row.get("FDir","—")); fc=str(row.get("FC","#4a5568"))
+            sv2=str(row.get("Sinyal_v2",row.get("Signal","-"))); av2=str(row.get("Aksi_v2","-"))
             tp_v=row.get("TP",0); sl_v=row.get("SL",0); price=row.get("Price",0)
             pp=(tp_v-price)/max(price,1)*100 if price>0 else 0
-            lwick=row.get("LWick",0)
-            rows_html+=f"""<tr style="font-family:Space Mono,monospace;font-size:10px;">
-<td style="padding:5px 6px;font-weight:700;color:#e6edf3;text-align:left;border-bottom:1px solid #1c2533;white-space:nowrap">{row["Ticker"]}</td>
-<td style="padding:5px 6px;color:{gc};font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{row.get("ROC 3B%",0):+.1f}%</td>
-<td style="padding:5px 6px;color:{"#00ff88" if lwick>30 else "#4a5568"};border-bottom:1px solid #1c2533;text-align:center">{lwick:.0f}%</td>
-<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center">{tt_aksi_badge(av2)}</td>
-<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center">{tt_sinyal_badge(sv2)}</td>
-<td style="padding:5px 6px;color:#ff7b00;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{rvol_s}</td>
-<td style="padding:5px 6px;color:#c9d1d9;border-bottom:1px solid #1c2533;text-align:center">{row["Price"]:,}</td>
-<td style="padding:5px 6px;background:#0d2b0d;color:#00ff88;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{int(tp_v):,}</td>
-<td style="padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center">{int(sl_v):,}</td>
-<td style="padding:5px 6px;color:#00ff88;border-bottom:1px solid #1c2533;text-align:center">{pp:.1f}%</td>
-<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center"><span style="color:{rsi_c};font-weight:700">{rsi_s}</span></td>
-<td style="padding:5px 6px;color:{rsi_c};border-bottom:1px solid #1c2533;text-align:center">{rsi_v:.0f}</td>
-<td style="padding:5px 6px;color:#4a5568;font-size:9px;border-bottom:1px solid #1c2533;text-align:center">{row.get("Turnover(M)",0):.0f}M</td>
-<td style="padding:5px 6px;color:{fc};border-bottom:1px solid #1c2533;text-align:center;font-size:10px">{fd}</td>
-</tr>"""
-        st.markdown(f"""<div style="overflow-x:auto;border-radius:8px;border:1px solid #1c2533;max-height:70vh;overflow-y:auto;">
-<table style="width:100%;border-collapse:collapse;">
-<thead><tr style="background:#080c10;position:sticky;top:0;z-index:10;">
-  {"".join(f'<th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533">{h}</th>' for h in ["EMITEN","GAIN","WICK","AKSI","SINYAL","RVOL","NOW","TP","SL","PROFIT","RSI SIG","RSI","TURNOVER","ASING"])}
-</tr></thead>
-<tbody style="background:#0d1117">{rows_html}</tbody>
-</table>
-<div style="padding:6px 12px;background:#080c10;font-family:Space Mono,monospace;font-size:9px;color:#4a5568;border-top:1px solid #1c2533">
-  Theta Turbo v5.2 ⚡ DS + yFinance Ticker() · Zero Rate Limit ✅
-</div></div>""", unsafe_allow_html=True)
+            mg_v=str(row.get("Mesin_Grade","—")); mg_c2=str(row.get("Mesin_Color","#4a5568"))
+            ms_v=float(row.get("Mesin_Score",0))
+            iq_v=str(row.get("IQ_Verdict","—")); iq_s=float(row.get("IQ_Score",0))
+            iq_m=str(row.get("IQ_MA","—")); iq_b=float(row.get("IQ_Bagger",0))
+            iq_m_color="#00ff88" if iq_m=="BULLISH" else("#ff3d5a" if iq_m=="BEARISH" else "#5a6478")
+            iq_b_color="#bf5fff" if iq_b>=65 else "#4a5568"
+            iq_b_star="*" if iq_b>=65 else ""
+            rows_html+=(f'<tr style="font-family:Space Mono,monospace;font-size:10px;">'
+                f'<td style="padding:5px 6px;font-weight:700;color:#e6edf3;text-align:left;border-bottom:1px solid #1c2533;white-space:nowrap">{row["Ticker"]}</td>'
+                f'<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:left">{mesin_badge(mg_v)}</td>'
+                f'<td style="padding:5px 6px;color:{mg_c2};font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{ms_v:.0f}</td>'
+                f'<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center">{tt_aksi_badge(av2)}</td>'
+                f'<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center">{tt_sinyal_badge(sv2)}</td>'
+                f'<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center">{iq_verdict_badge(iq_v)}</td>'
+                f'<td style="padding:5px 6px;color:#2dd4bf;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{iq_s:.0f}</td>'
+                f'<td style="padding:5px 6px;color:{iq_m_color};border-bottom:1px solid #1c2533;text-align:center;font-size:9px">{iq_m}</td>'
+                f'<td style="padding:5px 6px;color:{iq_b_color};border-bottom:1px solid #1c2533;text-align:center">{iq_b:.0f}{iq_b_star}</td>'
+                f'<td style="padding:5px 6px;color:#ff7b00;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{rvol_s}</td>'
+                f'<td style="padding:5px 6px;color:{gc};font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{roc:+.1f}%</td>'
+                f'<td style="padding:5px 6px;color:#c9d1d9;border-bottom:1px solid #1c2533;text-align:center">{row["Price"]:,}</td>'
+                f'<td style="padding:5px 6px;background:#0d2b0d;color:#00ff88;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{int(tp_v):,}</td>'
+                f'<td style="padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center">{int(sl_v):,}</td>'
+                f'<td style="padding:5px 6px;color:#00ff88;border-bottom:1px solid #1c2533;text-align:center">{pp:.1f}%</td>'
+                f'<td style="padding:5px 6px;color:{rsi_c};border-bottom:1px solid #1c2533;text-align:center">{rsi_v:.0f}</td>'
+                f'<td style="padding:5px 6px;color:#4a5568;font-size:9px;border-bottom:1px solid #1c2533;text-align:center">{row.get("Turnover(M)",0):.0f}M</td>'
+                f'<td style="padding:5px 6px;color:{fc};border-bottom:1px solid #1c2533;text-align:center;font-size:10px">{fd}</td>'
+                f'</tr>')
+        st.markdown(
+            f'<div style="overflow-x:auto;border-radius:8px;border:1px solid #1c2533;max-height:70vh;overflow-y:auto;">'
+            f'<table style="width:100%;border-collapse:collapse;">'
+            f'<thead><tr style="background:#080c10;position:sticky;top:0;z-index:10;">{header_html}</tr></thead>'
+            f'<tbody style="background:#0d1117">{rows_html}</tbody>'
+            f'</table>'
+            f'<div style="padding:6px 12px;background:#080c10;font-family:Space Mono,monospace;font-size:9px;color:#4a5568;border-top:1px solid #1c2533">'
+            f'Mesin Presisi v1.0 — TT 15M x IDX Quant Daily (151 Strategies) — Zero Rate Limit</div>'
+            f'</div>',
+            unsafe_allow_html=True)
 
 # ════ TAB WATCHLIST ════
 with tab_watchlist:
@@ -1739,7 +2019,7 @@ else:
     ti="⏱️ Klik Scan untuk mulai"
 
 st.markdown(f"""<div style="margin-top:28px;padding-top:14px;border-top:1px solid #1c2533;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-  <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">🔥 Theta Turbo v5.2 · DS ⚡ + yFinance Ticker() · Zero Rate Limit ✅</div>
+  <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">🔥 Mesin Presisi v1.0 · TT 15M × IDX Quant (151 Strategies) · Zero Rate Limit ✅</div>
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">{ti}</div>
 </div>""",unsafe_allow_html=True)
 
