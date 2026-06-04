@@ -374,7 +374,8 @@ def iq_analyze(df_daily):
 
         # Composite score: Momentum 40% + MA 35% + Bagger 25%
         comp = round(mom["score"]*0.40 + ma["score"]*0.35 + bag["score"]*0.25, 1)
-        verdict = "BUY" if comp>=65 else "HOLD" if comp>=45 else "WAIT"
+        # Verdict threshold: BUY ≥55 (was 65), HOLD ≥40 (was 45) — biar align dgn reality
+        verdict = "BUY" if comp>=55 else "HOLD" if comp>=40 else "WAIT"
 
         all_signals = mom["signals"] + ma["signals"][:2] + bag["signals"][:2]
 
@@ -390,20 +391,25 @@ def calc_mesin_grade(tt_score, tt_signal, iq_score, iq_verdict, iq_bagger):
     Gabungan TT 15m (timing) + IQ daily (direction).
     Keduanya agree = high conviction signal.
 
-    PRESISI 🎯  = TT GACOR/REVERSAL + IQ BUY        → strong entry NOW
-    KUAT ⚡     = TT POTENSIAL + IQ BUY, atau TT GACOR + IQ HOLD
-    BAGGER 💎   = TT BAGGER/KANDIDAT + IQ Bagger ≥ 60 → accumulation
     BANDAR 🔵   = TT BANDAR/HAKA/SUPER + IQ BUY      → smart money confirm
-    MONITOR 👁️  = salah satu bullish, satunya netral
+    PRESISI 🎯  = TT GACOR/REVERSAL + IQ BUY         → strong entry NOW
+    BAGGER 💎   = TT BAGGER/KANDIDAT + IQ Bagger ≥ 60→ accumulation
+    KUAT ⚡     = TT POTENSIAL + IQ BUY, atau TT GACOR + IQ HOLD
+    MONITOR 👁️  = IQ BUY tapi TT belum sempurna
+    TT-ONLY 🔥  = TT signal kuat tapi IQ UNKNOWN (data daily kurang)
+    WATCH 👀    = TT moderate, IQ neutral/unknown
     WAIT ❌     = tidak ada alignment
     """
     is_tt_strong  = any(k in tt_signal for k in ["GACOR","REVERSAL"])
     is_tt_smart   = any(k in tt_signal for k in ["BANDAR","HAKA","SUPER"])
     is_tt_bag     = any(k in tt_signal for k in ["BAGGER","KANDIDAT"])
     is_tt_mod     = any(k in tt_signal for k in ["POTENSIAL","REBOUND","AKUM"])
+    is_tt_watch   = any(k in tt_signal for k in ["WATCH","ON TRACK"])
     is_iq_buy     = iq_verdict == "BUY"
     is_iq_hold    = iq_verdict == "HOLD"
+    is_iq_unknown = iq_verdict == "UNKNOWN"
 
+    # Aligned with both confirmation
     if is_tt_smart and is_iq_buy:
         return "BANDAR 🔵", "#4da6ff", min(100, tt_score/6*50 + iq_score/100*50 + 22)
     if is_tt_strong and is_iq_buy:
@@ -414,8 +420,23 @@ def calc_mesin_grade(tt_score, tt_signal, iq_score, iq_verdict, iq_bagger):
         return "KUAT ⚡", "#ffb700", min(100, tt_score/6*50 + iq_score/100*50 + 10)
     if is_tt_strong and is_iq_hold:
         return "KUAT ⚡", "#ffb700", min(100, tt_score/6*50 + iq_score/100*50 + 8)
-    if is_iq_buy and (is_tt_strong or is_tt_mod):
+
+    # TT-only grades (IQ UNKNOWN/missing - sering kejadian utk gorengan baru listing)
+    if is_iq_unknown:
+        if is_tt_smart:  return "BANDAR 🔵", "#4da6ff", min(100, tt_score/6*70 + 15)
+        if is_tt_strong: return "TT-ONLY 🔥", "#ff7b00", min(100, tt_score/6*70 + 12)
+        if is_tt_bag:    return "BAGGER 💎", "#bf5fff", min(100, tt_score/6*70 + 10)
+        if is_tt_mod:    return "KUAT ⚡",   "#ffb700", min(100, tt_score/6*70 + 5)
+        if is_tt_watch:  return "WATCH 👀",  "#00e5ff", min(60, tt_score/6*60)
+
+    # Other partial alignment
+    if is_iq_buy and (is_tt_strong or is_tt_mod or is_tt_smart):
         return "MONITOR 👁️", "#00e5ff", tt_score/6*50 + iq_score/100*50
+    if (is_tt_strong or is_tt_smart) and is_iq_hold:
+        return "MONITOR 👁️", "#00e5ff", tt_score/6*50 + iq_score/100*50 - 5
+    if is_tt_watch and (is_iq_buy or is_iq_hold):
+        return "WATCH 👀", "#00e5ff", min(60, tt_score/6*50 + iq_score/100*50 - 5)
+
     return "WAIT ❌", "#ff3d5a", max(0, tt_score/6*50 + iq_score/100*50 - 10)
 
 # ════════════════════════════════════════════════════
@@ -1380,7 +1401,7 @@ with tab_scanner:
             # yFinance daily fallback — Ticker().history() parallel, no rate limit!
             missing_daily=[t for t in list(data_dict.keys()) if t not in daily_dict]
             if missing_daily:
-                yf_daily=_fetch_yf_parallel(missing_daily,"5d","1d",workers=6)
+                yf_daily=_fetch_yf_parallel(missing_daily,"60d","1d",workers=4)
                 for t_d,df_d in yf_daily.items():
                     if df_d is not None and len(df_d)>=2:
                         daily_dict[t_d]=df_d
@@ -1532,7 +1553,7 @@ with tab_scanner:
                 dft=pd.DataFrame(results).sort_values("Mesin_Score",ascending=False)
                 # Hanya kirim sinyal dengan Mesin Grade bermakna (skip WAIT/MARGINAL/LEMAH)
                 quality_mask=dft["Mesin_Grade"].astype(str).str.contains(
-                    "PRESISI|BANDAR|BAGGER|KUAT|MONITOR", na=False)
+                    "PRESISI|BANDAR|BAGGER|KUAT|MONITOR|TT-ONLY|WATCH", na=False)
                 dft_q=dft[quality_mask]
                 cs=set(dft_q["Ticker"].tolist())
                 na=cs-st.session_state.tt_last_sent  # new alerts only
@@ -1717,11 +1738,14 @@ with tab_scanner:
 
         def mesin_badge(mg3):
             mg3=str(mg3)
+            # Order matters: cek yang lebih spesifik dulu
             M2={"PRESISI":("#00ff88","#0a1a10","rgba(0,255,136,.4)"),
                 "BANDAR": ("#4da6ff","#0a1525","rgba(77,166,255,.4)"),
                 "BAGGER": ("#bf5fff","#150a25","rgba(191,95,255,.4)"),
                 "KUAT":   ("#ffb700","#251800","rgba(255,183,0,.4)"),
+                "TT-ONLY":("#ff7b00","#1a0d05","rgba(255,123,0,.4)"),
                 "MONITOR":("#00e5ff","#0a1515","rgba(0,229,255,.3)"),
+                "WATCH":  ("#00e5ff","#0a1a1a","rgba(0,229,255,.2)"),
                 "WAIT":   ("#ff3d5a","#250a0d","rgba(255,61,90,.2)")}
             for k,(c,bg,brd) in M2.items():
                 if k in mg3: return f'<span style="background:{bg};color:{c};padding:3px 10px;border-radius:4px;font-size:10px;font-weight:700;border:1px solid {brd}">{mg3}</span>'
