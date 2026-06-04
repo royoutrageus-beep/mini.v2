@@ -963,10 +963,11 @@ def score_bagger(r, p, p2, df_full):
     return max(0,min(6,round(score,1))),reasons,{"wyckoff_phase":wyckoff_phase}
 
 def get_signal(score, mode):
-    t={"Scalping ⚡":{5:"GACOR ⚡",4:"POTENSIAL 🔥",3:"WATCH 👀"},
-       "Momentum 🚀":{5:"GACOR 🚀",4:"POTENSIAL 🔥",3:"WATCH 👀"},
-       "Reversal 🎯":{5:"REVERSAL 🎯",4:"POTENSIAL 🔥",3:"WATCH 👀"},
-       "Bagger 💎":{5:"BAGGER 💎",4:"KANDIDAT 🚀",3:"WATCH 👀"}}.get(mode,{})
+    # Threshold diturunin biar low-score juga dapet label (gak WAIT)
+    t={"Scalping ⚡":{5:"GACOR ⚡",   4:"POTENSIAL 🔥",3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"},
+       "Momentum 🚀":{5:"GACOR 🚀",   4:"POTENSIAL 🔥",3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"},
+       "Reversal 🎯":{5:"REVERSAL 🎯",4:"POTENSIAL 🔥",3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"},
+       "Bagger 💎":  {5:"BAGGER 💎",  4:"KANDIDAT 🚀", 3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"}}.get(mode,{})
     for th in sorted(t.keys(),reverse=True):
         if score>=th: return t[th]
     return "WAIT"
@@ -1206,7 +1207,7 @@ with tab_scanner:
                 min_score=rcfg["min_score"]; vol_thresh=rcfg["min_rvol"]
                 st.caption(f"Auto: Score≥{min_score} · RVOL≥{vol_thresh}x")
             else:
-                min_score=st.slider("Min Score (0-6)",0,6,4,key="msc")
+                min_score=st.slider("Min Score (0-6)",0,6,2,key="msc")
                 vol_thresh=st.slider("Min RVOL Spike",1.0,5.0,1.5,0.1,key="vol")
             min_turn=st.number_input("Min Turnover (M Rp)",value=100,step=100,key="trn")*1_000_000
         with sc3:
@@ -1382,7 +1383,8 @@ with tab_scanner:
                     else:                          sc,reasons,_=score_reversal(r,p,p2)
                     if sc<min_score: continue
                     sig=get_signal(sc,scan_mode)
-                    if sig=="WAIT": continue
+                    # NOTE: filter "if sig==WAIT continue" dihapus —
+                    # min_score slider yang jadi sole filter (jadi rata kiri = score 0+ all show)
                     sig_v2,sc_v2,flags_v2,gc_now=get_sinyal_v2(r,p,p2)
                     aksi_v2=get_aksi_v2(sig_v2,gc_now,sc_v2)
                     atr=float(r["ATR"]) if not np.isnan(float(r["ATR"])) else close*0.01
@@ -1624,7 +1626,9 @@ with tab_scanner:
             M={"BANDAR":("#4da6ff","#0a1525"),"HAKA":("#00ff88","#0a2010"),"SUPER":("#bf5fff","#150a25"),
                "REBOUND":("#ffb700","#251800"),"JUAL":("#ff3d5a","#250a0d"),"AKUM":("#00e5ff","#0a1515"),
                "ON TRACK":("#00ff88","#0a1a0a"),"GACOR":("#00ff88","#0a2010"),"REVERSAL":("#bf5fff","#1a0d2e"),
-               "POTENSIAL":("#ffb700","#1a1a0d")}
+               "POTENSIAL":("#ffb700","#1a1a0d"),"WATCH":("#00e5ff","#0a1a1a"),
+               "LEMAH":("#888888","#1a1a1a"),"MARGINAL":("#666666","#151515"),
+               "WAIT":("#4a5568","#0d0d0d")}
             for k,(c,bg) in M.items():
                 if k in s: return f'<span style="background:{bg};color:{c};padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid {c}44">{s}</span>'
             return f'<span style="background:#1a1a1a;color:#4a5568;padding:2px 10px;border-radius:4px;font-size:9px;font-weight:700">{s}</span>'
