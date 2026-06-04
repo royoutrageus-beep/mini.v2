@@ -16,8 +16,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ════════════════════════════════════════════════════
 #  CONFIG
 # ════════════════════════════════════════════════════
-TOKEN   = st.secrets.get("TELEGRAM_TOKEN", "")
-CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
+import os
+def _get_secret(*keys, default=""):
+    """Try multiple secret key names, fallback to env vars."""
+    for k in keys:
+        try:
+            v = st.secrets.get(k, "")
+            if v: return v
+        except: pass
+        v = os.environ.get(k, "")
+        if v: return v
+    return default
+
+TOKEN   = _get_secret("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN")
+CHAT_ID = _get_secret("TELEGRAM_CHAT_ID", "CHAT_ID")
 jakarta_tz = pytz.timezone('Asia/Jakarta')
 
 try:
@@ -1130,24 +1142,35 @@ def fetch_intraday(tickers, interval="15m"):
     return all_dfs
 
 def send_telegram(results_top, source="Scanner"):
-    if not TOKEN or not CHAT_ID: return
+    if not TOKEN or not CHAT_ID: return False
     now=datetime.now(jakarta_tz); is_open=9<=now.hour<16; sep="━"*28
-    hdr=(f"{{'🔴 MARKET OPEN' if is_open else '🌙 AFTER HOURS'}}\n🔥 *THETA TURBO {{'WATCHLIST' if source=='Watchlist' else 'ALERT'}}*\n"
+    # Bener-bener evaluate conditional di f-string (bukan {{}})
+    market_status="🔴 MARKET OPEN" if is_open else "🌙 AFTER HOURS"
+    alert_type="WATCHLIST" if source=="Watchlist" else "SCANNER"
+    hdr=(f"{market_status}\n⚡ *MESIN PRESISI {alert_type}*\n"
          f"⏰ `{now.strftime('%H:%M:%S')} WIB` · `{now.strftime('%d %b %Y')}`\n{sep}\n")
-    for r in results_top[:5]:
+    body=""  # INIT! Sebelumnya gak diinit → UnboundLocalError
+    for r in results_top[:8]:
         sig=r.get("Signal","-")
-        em="🏆" if("GACOR" in sig or "REVERSAL" in sig) else("🔥" if "POTENSIAL" in sig else "👀")
+        mg=r.get("Mesin_Grade","—")
+        ms=r.get("Mesin_Score",0)
+        em=("🎯" if "PRESISI" in mg else "🔵" if "BANDAR" in mg else "💎" if "BAGGER" in mg
+            else "⚡" if "KUAT" in mg else "🏆" if("GACOR" in sig or "REVERSAL" in sig)
+            else "🔥" if "POTENSIAL" in sig else "👀")
         te="📈" if "▲" in r.get("Trend","") else("📉" if "▼" in r.get("Trend","") else "➡️")
-        body+=(f"\n{em} *{r['Ticker']}*  `{sig}`\n"
-               f"   💰 Price: `{r['Price']:,}` {te}\n"
-               f"   📈 RSI-EMA: `{r.get('RSI-EMA',0)}` | RVOL: `{r.get('RVOL',0)}x`\n"
-               f"   🎯 TP: `{r['TP']:,}` | 🛑 SL: `{r['SL']:,}`\n"
+        iq_v=r.get("IQ_Verdict","—"); iq_s=r.get("IQ_Score",0)
+        body+=(f"\n{em} *{r['Ticker']}* `[{mg}]` MS:`{ms:.0f}`\n"
+               f"   💰 `{r['Price']:,}` {te} · TT:`{sig}`\n"
+               f"   📊 IQ Daily: `{iq_v}` ({iq_s:.0f}/100)\n"
+               f"   📈 RSI: `{r.get('RSI-EMA',0):.0f}` · RVOL: `{r.get('RVOL',0):.1f}x`\n"
+               f"   🎯 TP: `{r['TP']:,}` 🛑 SL: `{r['SL']:,}` R:R `{r.get('R:R',0)}`\n"
                f"   💡 _{r.get('Reasons','')[:60]}_\n")
-    footer=f"\n{sep}\n⚡ _Theta Turbo v5 · 15M_\n⚠️ _BUKAN saran investasi!_"
+    footer=f"\n{sep}\n⚡ _Mesin Presisi v1.0 · TT 15M × IQ Daily_\n⚠️ _BUKAN saran investasi!_"
     try:
-        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                      data={"chat_id":CHAT_ID,"text":hdr+body+footer,"parse_mode":"Markdown"},timeout=10)
-    except: pass
+        resp=requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                          data={"chat_id":CHAT_ID,"text":hdr+body+footer,"parse_mode":"Markdown"},timeout=10)
+        return resp.status_code==200
+    except Exception as e: return False
 
 SECTORS={
     "Energi & Mining":    ["ADRO","BYAN","ITMG","PTBA","HRUM","DOID","GEMS","PGAS","ELSA","MEDC","ESSA","AKRA","RIGS","DSSA","MBAP","KKGI","MYOH","SMMT","BSSR","INDY"],
@@ -1203,6 +1226,23 @@ with tab_scanner:
             else:
                 scan_mode=st.radio("Mode",["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"],label_visibility="collapsed",key="smr")
             tele_on=st.toggle("📡 Telegram Alert",value=True,key="tele_on")
+            # Status TOKEN/CHAT_ID
+            if tele_on:
+                if TOKEN and CHAT_ID:
+                    st.caption(f"✅ TG ready · Token: ...{TOKEN[-8:]} · Chat: {CHAT_ID}")
+                    if st.button("🔔 Test TG",key="tg_test_btn",use_container_width=True):
+                        ok=send_telegram([{"Ticker":"TEST","Price":1000,"Signal":"TEST 🔔",
+                                          "Mesin_Grade":"PRESISI 🎯","Mesin_Score":99,
+                                          "IQ_Verdict":"BUY","IQ_Score":80,
+                                          "Trend":"▲ UP","RSI-EMA":55,"RVOL":2.1,
+                                          "TP":1050,"SL":980,"R:R":2.0,
+                                          "Reasons":"Test notif dari Mesin Presisi"}])
+                        st.success("✅ Terkirim!") if ok else st.error("❌ Gagal — cek token & chat_id")
+                else:
+                    missing=[]
+                    if not TOKEN: missing.append("TELEGRAM_TOKEN")
+                    if not CHAT_ID: missing.append("TELEGRAM_CHAT_ID")
+                    st.caption(f"⚠️ Missing: {', '.join(missing)} di secrets.toml")
         with sc2:
             st.markdown('<div class="settings-label">FILTER</div>',unsafe_allow_html=True)
             auto_thresh=st.toggle("🤖 Auto-Threshold",value=True,key="auto_thr")
@@ -1488,12 +1528,27 @@ with tab_scanner:
                 st.success(f"✅ {len(results)} sinyal ditemukan dari {len(data_dict)} saham!")
             if tele_on and results:
                 if "tt_last_sent" not in st.session_state: st.session_state.tt_last_sent=set()
-                dft=pd.DataFrame(results).sort_values("Score",ascending=False)
-                cs=set(dft["Ticker"].tolist()); na=cs-st.session_state.tt_last_sent
+                # Sort by Mesin_Score → kirim sinyal kualitas terbaik dulu
+                dft=pd.DataFrame(results).sort_values("Mesin_Score",ascending=False)
+                # Hanya kirim sinyal dengan Mesin Grade bermakna (skip WAIT/MARGINAL/LEMAH)
+                quality_mask=dft["Mesin_Grade"].astype(str).str.contains(
+                    "PRESISI|BANDAR|BAGGER|KUAT|MONITOR", na=False)
+                dft_q=dft[quality_mask]
+                cs=set(dft_q["Ticker"].tolist())
+                na=cs-st.session_state.tt_last_sent  # new alerts only
                 if na:
-                    tn=dft[dft["Ticker"].isin(na)].head(5).to_dict("records")
-                    if tn: send_telegram(tn)
+                    tn=dft_q[dft_q["Ticker"].isin(na)].head(8).to_dict("records")
+                    if tn:
+                        ok_send = send_telegram(tn)
+                        if ok_send:
+                            st.success(f"📡 Telegram: {len(tn)} sinyal terkirim ke Telegram!")
+                        else:
+                            st.warning(f"⚠️ Telegram gagal kirim — cek TOKEN & CHAT_ID di secrets.toml")
                     st.session_state.tt_last_sent.update(na)
+                elif len(dft_q)>0:
+                    st.info(f"📡 Telegram: {len(dft_q)} sinyal quality tapi sudah pernah dikirim (anti-spam)")
+                else:
+                    st.info(f"📡 Telegram: tidak ada sinyal kualitas (PRESISI/BANDAR/BAGGER/KUAT/MONITOR) untuk dikirim")
                 st.session_state.tt_last_sent=st.session_state.tt_last_sent&cs
         except Exception as e:
             try: prog_ph.empty(); pb.empty()
