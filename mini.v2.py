@@ -762,6 +762,8 @@ def apply_intraday_indicators(df):
     try:
         tp=(df["High"]+df["Low"]+df["Close"])/3
         df["VWAP"]=(tp*df["Volume"]).cumsum()/df["Volume"].cumsum()
+        # FIX: kalau volume cumsum = 0 (semua bar vol=0) → VWAP NaN → fill dengan Close
+        df["VWAP"] = df["VWAP"].fillna(c)
     except: df["VWAP"]=c
     df["BB_mid"]=c.rolling(20).mean(); df["BB_std"]=c.rolling(20).std()
     df["BB_upper"]=df["BB_mid"]+2*df["BB_std"]; df["BB_lower"]=df["BB_mid"]-2*df["BB_std"]
@@ -1348,14 +1350,27 @@ with tab_scanner:
             prog_ph.markdown(f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">⚙️ Processing {len(data_dict)} saham...</div>',unsafe_allow_html=True)
             results=[]; tickers=list(data_dict.keys())
             daily_dict=st.session_state.get("daily_dict",{})
+            # Track skip reasons untuk debug
+            skip_reasons={"short":0,"price0":0,"turnover":0,"score":0,"error":0}
+            last_err=[""]
             for i,ticker_yf in enumerate(tickers):
                 pb.progress(0.85+(i+1)/max(len(tickers),1)*0.14)
                 try:
                     df=data_dict[ticker_yf].copy()
-                    if len(df)<30: continue
+                    if len(df)<30: skip_reasons["short"]+=1; continue
                     df=apply_intraday_indicators(df)
                     r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3] if len(df)>=3 else p
-                    close=float(r["Close"]); vol=float(r["Volume"])
+                    # NaN-safe conversion helpers — yFinance data sometimes has NaN!
+                    def _si(v, d=0):
+                        try:
+                            x=float(v); return d if(np.isnan(x) or np.isinf(x)) else int(x)
+                        except: return d
+                    def _sff(v, d=0.0):
+                        try:
+                            x=float(v); return d if(np.isnan(x) or np.isinf(x)) else x
+                        except: return d
+                    close=_sff(r.get("Close",0)); vol=_sff(r.get("Volume",0))
+                    if close<=0: skip_reasons["price0"]+=1; continue  # skip jika harga invalid
                     ticker_raw=ticker_yf.replace(".JK","").upper()
                     df_d=daily_dict.get(ticker_yf) or daily_dict.get(ticker_raw)
                     if df_d is not None and len(df_d)>=2:
@@ -1376,12 +1391,12 @@ with tab_scanner:
                             turnover=close*max(vol,0); gain_pct=float(r.get("ROC3",0))*100
                     rvol_raw=float(r["RVOL"]) if not np.isnan(float(r["RVOL"])) else 1.0
                     rvol=rvol_raw
-                    if turnover<min_turn or rvol<vol_thresh: continue
+                    if turnover<min_turn or rvol<vol_thresh: skip_reasons["turnover"]+=1; continue
                     if scan_mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p,p2)
                     elif scan_mode=="Momentum 🚀": sc,reasons,_=score_momentum(r,p,p2)
                     elif scan_mode=="Bagger 💎":   sc,reasons,_=score_bagger(r,p,p2,df)
                     else:                          sc,reasons,_=score_reversal(r,p,p2)
-                    if sc<min_score: continue
+                    if sc<min_score: skip_reasons["score"]+=1; continue
                     sig=get_signal(sc,scan_mode)
                     # NOTE: filter "if sig==WAIT continue" dihapus —
                     # min_score slider yang jadi sole filter (jadi rata kiri = score 0+ all show)
@@ -1415,18 +1430,19 @@ with tab_scanner:
                         sc, sig+"|"+sig_v2, iq["iq_score"], iq["iq_verdict"], iq["iq_bagger"])
 
                     results.append({
-                        "Ticker":stock_map.get(ticker_yf,ticker_raw),"Price":int(close),"Score":sc,
+                        "Ticker":stock_map.get(ticker_yf,ticker_raw),"Price":_si(close),"Score":sc,
                         "Signal":sig,"Sinyal_v2":sig_v2,"Aksi_v2":aksi_v2,
-                        "Trend":trend,"RSI-EMA":round(float(r["RSI_EMA"]),1),
-                        "Stoch K":round(float(r["STOCH_K"]),1),"Stoch D":round(float(r["STOCH_D"]),1),
-                        "MACD Hist":round(float(r["MACD_Hist"]),4),"RVOL":round(rvol,2),
-                        "BB%":round(float(r["BB_pct"]),2),"ROC 3B%":round(gain_pct,2),
+                        "Trend":trend,"RSI-EMA":round(_sff(r.get("RSI_EMA",50)),1),
+                        "Stoch K":round(_sff(r.get("STOCH_K",50)),1),"Stoch D":round(_sff(r.get("STOCH_D",50)),1),
+                        "MACD Hist":round(_sff(r.get("MACD_Hist",0)),4),"RVOL":round(rvol,2),
+                        "BB%":round(_sff(r.get("BB_pct",0.5)),2),"ROC 3B%":round(gain_pct,2),
                         "Gain":round(gain_pct,1),
-                        "VWAP":int(float(r["VWAP"])),"TP":int(tp),"SL":int(sl),"R:R":round(rr,1),
+                        "VWAP":_si(r.get("VWAP",close),_si(close)),
+                        "TP":_si(tp),"SL":_si(sl),"R:R":round(rr,1),
                         "Turnover(M)":round(turnover/1e6,1),"Val":val_str,
                         "Reasons":" · ".join(reasons),"_class":get_card_class(sig),
                         "LWick":round(lwick,1),"FDir":fdir,"FC":fc_,
-                        "FNet3":int(fnet3),"FNet8":int(fnet8),"FRatio":round(fratio,2),
+                        "FNet3":_si(fnet3),"FNet8":_si(fnet8),"FRatio":round(fratio,2),
                         "sc_v2":sc_v2,"gc_now":gc_now,
                         # ── IDX QUANT fields ──
                         "IQ_Score":round(iq["iq_score"],1),
@@ -1440,7 +1456,10 @@ with tab_scanner:
                         "Mesin_Color":mg_col,
                         "Mesin_Score":round(ms,1),
                     })
-                except: continue
+                except Exception as _exc:
+                    skip_reasons["error"]+=1
+                    last_err[0]=f"{type(_exc).__name__}: {str(_exc)[:80]}"
+                    continue
             pb.progress(1.0); prog_ph.empty(); pb.empty()
             st.session_state.scan_results=results
             st.session_state.last_scan_time=now_jkt.timestamp()
@@ -1450,12 +1469,17 @@ with tab_scanner:
             if not results:
                 n_data = len(data_dict)
                 st.warning(
-                    f"⚠️ Scan selesai tapi 0 sinyal lolos dari {n_data} saham yang di-fetch.\n\n"
-                    f"**Coba turunkan filter:**\n"
-                    f"- Min Score → 1\n"
-                    f"- Min Turnover → 0\n"
-                    f"- Min RVOL → 0\n\n"
-                    f"Atau coba mode scan berbeda (Scalping / Momentum / Reversal)."
+                    f"⚠️ Scan selesai tapi 0 sinyal lolos dari {n_data} saham yang di-fetch."
+                )
+                st.error(
+                    f"**🔧 Breakdown skip reasons:**\n"
+                    f"- Data terlalu pendek (<30 bars): **{skip_reasons['short']}**\n"
+                    f"- Harga invalid (Close ≤ 0): **{skip_reasons['price0']}**\n"
+                    f"- Turnover/RVOL di bawah threshold: **{skip_reasons['turnover']}**\n"
+                    f"- Score di bawah min_score: **{skip_reasons['score']}**\n"
+                    f"- Exception (crash): **{skip_reasons['error']}**\n\n"
+                    f"**Last error:** `{last_err[0] or 'none'}`\n\n"
+                    f"**Saran:** turunkan Min Score → 0, Min Turnover → 0, Min RVOL → 0 di sidebar."
                 )
             else:
                 st.success(f"✅ {len(results)} sinyal ditemukan dari {len(data_dict)} saham!")
