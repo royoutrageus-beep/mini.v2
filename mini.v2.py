@@ -162,34 +162,70 @@ def fetch_ds_ohlcv(ticker, interval="15m", limit=200, force_fresh=False):
 #  yf.download()      = bulk API  = rate limited ❌ (DIHAPUS)
 #  random.shuffle + delay = sopan ke Yahoo ✅
 # ════════════════════════════════════════════════════
-def _fetch_yf_ticker(ticker_yf, period="7d", interval="15m"):
-    """Single ticker via Ticker().history() — chart API, no rate limit.
-    Robust: no timeout param (compat), relaxed volume filter.
-    """
+def _normalize_yf_df(df):
+    """Normalize DataFrame dari yfinance — handle berbagai versi & MultiIndex."""
+    if df is None or df.empty: return None
     try:
-        t  = yf.Ticker(ticker_yf)
-        # Jangan pakai timeout= (beberapa versi yfinance tidak support)
-        df = t.history(period=period, interval=interval, auto_adjust=True)
-        if df is None or df.empty: return None
-        # Normalize columns — yfinance kadang uppercase, kadang tidak
-        df.columns = [c.capitalize() for c in df.columns]
-        # Rename jika ada nama alternatif
-        rename_map = {"Adj close":"Close","Adj_close":"Close"}
+        # Handle MultiIndex (yf.download multi-ticker)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        # Normalize column names
+        df.columns = [str(c).strip().capitalize() for c in df.columns]
+        rename_map = {"Adj close":"Close","Adj_close":"Close","Adjclose":"Close"}
         df = df.rename(columns=rename_map)
         req = ["Open","High","Low","Close","Volume"]
         missing = [c for c in req if c not in df.columns]
         if missing: return None
         df = df[req].copy()
-        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+        df["Close"]  = pd.to_numeric(df["Close"],  errors="coerce")
+        df["Open"]   = pd.to_numeric(df["Open"],   errors="coerce").fillna(df["Close"])
+        df["High"]   = pd.to_numeric(df["High"],   errors="coerce").fillna(df["Close"])
+        df["Low"]    = pd.to_numeric(df["Low"],     errors="coerce").fillna(df["Close"])
+        df["Volume"] = pd.to_numeric(df["Volume"],  errors="coerce").fillna(0)
         df = df.dropna(subset=["Close"])
-        df = df[df["Close"] > 0]  # filter harga 0, bukan volume (IDX OK)
+        df = df[df["Close"] > 0]
         return df if len(df) >= 2 else None
-    except Exception as e:
-        return None
+    except: return None
 
-def _fetch_yf_parallel(tickers_yf, period="7d", interval="15m", workers=6, delay=(0.1,0.4)):
-    """Parallel fetch — workers=6 + random shuffle + delay = no rate limit."""
+def _fetch_yf_ticker(ticker_yf, period="7d", interval="15m"):
+    """
+    Single ticker fetch — 3-layer fallback untuk handle yfinance 1.x breaking changes.
+    Layer 1: Ticker().history()           — chart API, fastest
+    Layer 2: yf.download() single ticker  — bulk API fallback
+    Layer 3: Ticker().history(proxy=None) — explicit no-proxy
+    """
+    # ── Layer 1: Ticker().history() ─────────────────
+    try:
+        t = yf.Ticker(ticker_yf)
+        df = t.history(period=period, interval=interval, auto_adjust=True, actions=False)
+        result = _normalize_yf_df(df)
+        if result is not None: return result
+    except Exception: pass
+
+    # ── Layer 2: yf.download() single ticker ────────
+    try:
+        df = yf.download(
+            ticker_yf, period=period, interval=interval,
+            auto_adjust=True, progress=False, threads=False
+        )
+        result = _normalize_yf_df(df)
+        if result is not None: return result
+    except Exception: pass
+
+    # ── Layer 3: Ticker tanpa auto_adjust ───────────
+    try:
+        t = yf.Ticker(ticker_yf)
+        df = t.history(period=period, interval=interval, auto_adjust=False, actions=False)
+        result = _normalize_yf_df(df)
+        if result is not None: return result
+    except Exception: pass
+
+    return None
+
+def _fetch_yf_parallel(tickers_yf, period="7d", interval="15m", workers=4, delay=(0.2, 0.5)):
+    """Parallel fetch — workers=4 + shuffle + delay.
+    Fewer workers = less chance of simultaneous rate-limit trigger.
+    """
     results = {}; lock = threading.Lock()
     shuffled = list(tickers_yf); random.shuffle(shuffled)
     def _one(t):
@@ -1179,7 +1215,26 @@ with tab_scanner:
             quick_mode=st.toggle("⚡ Quick (200 saham)",value=False,key="quick_mode")
             st.caption(f"🎯 Regime: {regime} · Mode: {scan_mode}")
 
-    do_scan_btn=st.button("🔥 MULAI SCAN SEKARANG",type="primary",use_container_width=True,key="btn_scan")
+    _btn_c1, _btn_c2 = st.columns([3,1])
+    with _btn_c1:
+        do_scan_btn=st.button("🔥 MULAI SCAN SEKARANG",type="primary",use_container_width=True,key="btn_scan")
+    with _btn_c2:
+        do_diagnosa=st.button("🔧 Diagnosa",use_container_width=True,key="btn_diag")
+    if do_diagnosa:
+        with st.expander("🔧 DIAGNOSTIK yFinance", expanded=True):
+            st.code(f"yfinance: {yf.__version__}")
+            for _tk in ["BBCA.JK","TLKM.JK","GOTO.JK"]:
+                _r = _fetch_yf_ticker(_tk, "5d", "1d")
+                if _r is not None:
+                    st.success(f"✅ {_tk} → {len(_r)} rows, Close[-1]={float(_r['Close'].iloc[-1]):,.0f}")
+                else:
+                    st.error(f"❌ {_tk} → GAGAL")
+            # test 15m
+            _r15 = _fetch_yf_ticker("BBCA.JK","5d","15m")
+            if _r15 is not None:
+                st.success(f"✅ BBCA 15m → {len(_r15)} rows ✓")
+            else:
+                st.error("❌ BBCA 15m → GAGAL — coba ganti requirements.txt: yfinance==0.2.61")
     _now_check=now_jkt.timestamp(); auto_trigger=False
     if st.session_state.last_scan_time and not do_scan_btn:
         if _now_check-st.session_state.last_scan_time>=300 and st.session_state.scan_results:
@@ -1240,7 +1295,25 @@ with tab_scanner:
             status_color = "#00ff88" if len(data_dict)>0 else "#ff3d5a"
             prog_ph.markdown(f'<div style="color:{status_color};font-family:Space Mono,monospace;font-size:11px;">{"✅" if len(data_dict)>0 else "⚠️"} Data siap: <b>{len(data_dict)}</b> saham dari {len(ticker_list)} target [{src_lbl}]</div>',unsafe_allow_html=True)
             if len(data_dict)==0:
-                st.error("⚠️ 0 saham berhasil di-fetch! Kemungkinan penyebab:\n- yFinance timeout / rate limit → coba lagi dalam 30 detik\n- Tidak ada koneksi internet\n- Semua ticker tidak dikenali")
+                st.error("⚠️ 0 saham berhasil di-fetch. Lihat diagnostik di bawah.")
+                with st.expander("🔧 DIAGNOSTIK — klik untuk cek koneksi", expanded=True):
+                    st.code(f"yfinance version: {yf.__version__}\nPython workers: {4}\nTickers target: {len(ticker_list)}\nContoh ticker: {ticker_list[:3] if ticker_list else 'KOSONG!'}")
+                    st.caption("Test fetch BBCA.JK...")
+                    _test_df = _fetch_yf_ticker("BBCA.JK", "5d", "1d")
+                    if _test_df is not None:
+                        st.success(f"✅ BBCA.JK OK — {len(_test_df)} rows, cols: {_test_df.columns.tolist()}")
+                        st.caption("yFinance bisa fetch data. Kemungkinan masalah di paralel. Coba SCAN lagi.")
+                    else:
+                        st.error("❌ BBCA.JK juga gagal! Cek:\n- Internet Streamlit Cloud OK?\n- Coba tambahkan `yfinance==0.2.61` di requirements.txt")
+                    # Test download() as last resort
+                    try:
+                        _td2 = yf.download("BBCA.JK","5d","1d",progress=False,threads=False)
+                        if not _td2.empty:
+                            st.success(f"✅ yf.download() OK — {len(_td2)} rows")
+                        else:
+                            st.warning("⚠️ yf.download() kosong juga")
+                    except Exception as _te:
+                        st.error(f"❌ yf.download() error: {type(_te).__name__}: {str(_te)[:100]}")
                 st.stop()
             pb.progress(0.78)
 
