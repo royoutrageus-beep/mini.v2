@@ -1273,7 +1273,19 @@ with tab_scanner:
             else:
                 min_score=st.slider("Min Score (0-6)",0,6,2,key="msc")
                 vol_thresh=st.slider("Min RVOL Spike",1.0,5.0,1.5,0.1,key="vol")
+
+            # Liquid quality gate (anti non-liquid / thin stock)
+            only_liquid = st.toggle("✅ Only Liquid", value=True, key="only_liquid")
+            liq_colA, liq_colB = st.columns([2, 1])
+            with liq_colA:
+                min_avg_vol = st.number_input("Min AvgVol", value=1e5, step=1e4, key="min_avg_vol")
+                min_nonzero_ratio = st.slider("Min Nonzero Volume Ratio", 0.0, 1.0, 0.6, 0.05, key="min_nonzero_ratio")
+            with liq_colB:
+                min_atr_pct = st.slider("Min ATR%", 0.05, 1.5, 0.25, 0.05, key="min_atr_pct")
+                liq_window = st.slider("Volume Window", 10, 60, 20, 5, key="liq_window")
+
             min_turn=st.number_input("Min Turnover (M Rp)",value=100,step=100,key="trn")*1_000_000
+
         with sc3:
             st.markdown('<div class="settings-label">TAMPILAN</div>',unsafe_allow_html=True)
             view_mode=st.radio("View",["Card View 🃏","Table View 📊"],label_visibility="collapsed",key="vm")
@@ -1413,8 +1425,9 @@ with tab_scanner:
             results=[]; tickers=list(data_dict.keys())
             daily_dict=st.session_state.get("daily_dict",{})
             # Track skip reasons untuk debug
-            skip_reasons={"short":0,"price0":0,"turnover":0,"score":0,"error":0}
+            skip_reasons={"short":0,"price0":0,"turnover":0,"score":0,"liq_avgvol":0,"liq_nonzero":0,"liq_atr":0,"error":0}
             last_err=[""]
+
             for i,ticker_yf in enumerate(tickers):
                 pb.progress(0.85+(i+1)/max(len(tickers),1)*0.14)
                 try:
@@ -1433,6 +1446,33 @@ with tab_scanner:
                         except: return d
                     close=_sff(r.get("Close",0)); vol=_sff(r.get("Volume",0))
                     if close<=0: skip_reasons["price0"]+=1; continue  # skip jika harga invalid
+
+                    # Liquid quality gate (anti non-liquid / thin stock)
+                    if only_liquid:
+                        avg_vol_val = float(r.get("AvgVol", 0) or 0)
+                        atr_pct_val = 0.0
+                        try:
+                            atr_v = float(r.get("ATR", 0) or 0)
+                            atr_pct_val = (atr_v / close) * 100 if close > 0 else 0.0
+                        except:
+                            atr_pct_val = 0.0
+                        # Volume nonzero ratio on last `liq_window` bars
+                        try:
+                            tail = df["Volume"].tail(int(liq_window))
+                            nonzero_ratio_val = float((tail > 0).mean()) if len(tail) else 0.0
+                        except:
+                            nonzero_ratio_val = 0.0
+
+                        if avg_vol_val < float(min_avg_vol):
+                            skip_reasons["liq_avgvol"] += 1
+                            continue
+                        if nonzero_ratio_val < float(min_nonzero_ratio):
+                            skip_reasons["liq_nonzero"] += 1
+                            continue
+                        if atr_pct_val < float(min_atr_pct):
+                            skip_reasons["liq_atr"] += 1
+                            continue
+
                     ticker_raw=ticker_yf.replace(".JK","").upper()
                     # FIX: gak boleh pakai `or` untuk DataFrame (ambiguous truth value)
                     df_d = daily_dict.get(ticker_yf)
