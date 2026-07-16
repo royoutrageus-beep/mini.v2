@@ -1422,6 +1422,10 @@ with tab_scanner:
             st.markdown('<div class="settings-label">TAMPILAN</div>',unsafe_allow_html=True)
             view_mode=st.radio("View",["Card View 🃏","Table View 📊"],label_visibility="collapsed",key="vm")
             quick_mode=st.toggle("⚡ Quick (200 saham)",value=False,key="quick_mode")
+            # ── Fix #9: Auto-Scan Railway-style — scan saat dibuka + berkala via heartbeat ──
+            auto_scan_on=st.toggle("🔄 Auto-Scan (saat dibuka + berkala)",value=True,key="auto_scan_on")
+            auto_scan_sec=st.selectbox("Interval Auto-Scan",[300,600,900],index=2,
+                format_func=lambda s: f"{s//60} menit",key="auto_scan_sec")
             st.caption(f"🎯 Regime: {regime} · Mode: {scan_mode}")
 
     _btn_c1, _btn_c2 = st.columns([3,1])
@@ -1444,9 +1448,14 @@ with tab_scanner:
             else:
                 st.error("❌ BBCA 15m → GAGAL — coba ganti requirements.txt: yfinance==0.2.61")
     _now_check=now_jkt.timestamp(); auto_trigger=False
-    if st.session_state.last_scan_time and not do_scan_btn:
-        if _now_check-st.session_state.last_scan_time>=300 and st.session_state.scan_results:
-            auto_trigger=True
+    _auto_on=bool(st.session_state.get("auto_scan_on",True))
+    _auto_sec=int(st.session_state.get("auto_scan_sec",900))
+    if _auto_on and not do_scan_btn:
+        _lst=st.session_state.last_scan_time
+        if _lst is None:
+            auto_trigger=True   # fresh open → langsung scan (Railway-style)
+        elif _now_check-_lst>=_auto_sec:
+            auto_trigger=True   # interval lewat → scan ulang
 
     if do_scan_btn or auto_trigger:
         scan_list=stocks_yf[:200] if quick_mode else stocks_yf
@@ -1762,7 +1771,7 @@ with tab_scanner:
 
     if st.session_state.last_scan_time:
         _nc=now_jkt.timestamp()
-        _rem=max(0,300-(_nc-st.session_state.last_scan_time))
+        _rem=max(0,int(st.session_state.get("auto_scan_sec",900))-(_nc-st.session_state.last_scan_time))
         _lt=datetime.fromtimestamp(st.session_state.last_scan_time,jakarta_tz).strftime("%H:%M:%S")
         _el=int(_nc-st.session_state.last_scan_time)
         st.caption(f"⏱️ Scan {_el//60}m {_el%60}s lalu · Refresh dalam: {int(_rem//60):02d}:{int(_rem%60):02d} · Last: {_lt} WIB")
@@ -2505,20 +2514,39 @@ with tab_journal:
     else:
         st.markdown('<div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;"><div style="font-size:32px;margin-bottom:12px;">📓</div><div>JALANKAN SCANNER → SINYAL OTOMATIS KE-LOG DI SINI</div></div>',unsafe_allow_html=True)
 
-# ════ FOOTER + AUTO-REFRESH ════
+# ════ FOOTER + AUTO-REFRESH (Fix #9: heartbeat beneran, bukan rerun mati) ════
 _nf=now_jkt.timestamp()
+_FT_AUTO_ON=bool(st.session_state.get("auto_scan_on",True))
+_FT_AUTO_SEC=int(st.session_state.get("auto_scan_sec",900))
 if st.session_state.last_scan_time:
-    _r2=max(0,300-(_nf-st.session_state.last_scan_time)); m2=int(_r2//60); s2=int(_r2%60)
+    _r2=max(0,_FT_AUTO_SEC-(_nf-st.session_state.last_scan_time)); m2=int(_r2//60); s2=int(_r2%60)
     _lt2=datetime.fromtimestamp(st.session_state.last_scan_time,jakarta_tz).strftime("%H:%M:%S")
-    ti=f"⏱️ Next auto-scan: <span style='color:#ff7b00'>{m2:02d}:{s2:02d}</span> · Last: <span style='color:#2dd4bf'>{_lt2} WIB</span>"
+    _st_lbl="ON" if _FT_AUTO_ON else "OFF"
+    ti=f"⏱️ Auto-scan [{_st_lbl}] next: <span style='color:#ff7b00'>{m2:02d}:{s2:02d}</span> · Last: <span style='color:#2dd4bf'>{_lt2} WIB</span>"
 else:
-    ti="⏱️ Klik Scan untuk mulai"
+    ti="⏱️ Auto-scan aktif — scan pertama jalan otomatis" if _FT_AUTO_ON else "⏱️ Klik Scan untuk mulai"
 
 st.markdown(f"""<div style="margin-top:28px;padding-top:14px;border-top:1px solid #1c2533;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">🔥 Mesin Presisi v2.0 RIGID · Cost-Aware · SL-First · Non-Overlap · Session VWAP · Signal Journal ✅</div>
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">{ti}</div>
 </div>""",unsafe_allow_html=True)
 
-if st.session_state.last_scan_time:
-    if _nf-st.session_state.last_scan_time>=295:
-        time.sleep(5); st.rerun()
+# Heartbeat: fragment jalan tiap 30 detik di background TANPA re-render seluruh app.
+# Begitu interval lewat → trigger full rerun → auto_trigger nyala → scan jalan.
+# Ini pengganti pola Railway `while True + sleep` versi Streamlit yang benar.
+if _FT_AUTO_ON:
+    try:
+        @st.fragment(run_every="30s")
+        def _auto_heartbeat():
+            _lst=st.session_state.get("last_scan_time")
+            _sec=int(st.session_state.get("auto_scan_sec",900))
+            if _lst is None or (time.time()-_lst)>=_sec:
+                st.rerun(scope="app")
+        _auto_heartbeat()
+    except Exception:
+        # Fallback Streamlit lama (<1.37): full browser reload via JS.
+        # Session state ke-wipe, tapi hasil scan & last_scan_time ke-restore dari disk (_tt_load).
+        import streamlit.components.v1 as _components
+        _components.html(
+            f"<script>setTimeout(function(){{window.parent.location.reload();}}, {_FT_AUTO_SEC*1000});</script>",
+            height=0)
