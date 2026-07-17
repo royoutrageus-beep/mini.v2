@@ -9,6 +9,11 @@
 #  #6 Signal Log + tab Journal (falsifiability engine)
 #  #7 RVOL shift(1) + source tag DS/YF (apple-to-apple)
 #  #8 Liquidity gate dlm NILAI turnover (bukan lembar)
+#  #9 Auto-scan heartbeat (st.fragment run_every) — Railway-style
+#  #10 Google Sheets persistence utk Signal Journal (fallback CSV)
+#  + PHYSICS ENGINE: √impact (Bouchaud) · EWMA vol (Engle) · fat tails
+#    · momentum horizon T+1/3/5 · Kelly sizing dari expectancy realisasi
+#  requirements.txt: streamlit yfinance pandas numpy pytz requests gspread google-auth
 # ═══════════════════════════════════════════════════════════════
 import math
 import yfinance as yf
@@ -133,39 +138,187 @@ def _cache_age(ticker, tf):
     return None
 
 # ════════════════════════════════════════════════════
-#  SIGNAL LOG — Fix #6: falsifiability engine
-#  Tiap sinyal lolos Scanner = 1 row CSV.
-#  Outcome T+1/T+3/T+5 (net cost) di-join otomatis via tab Journal.
-#  Ini yang menjawab "harian/mingguan/bulanan?" pakai DATA, bukan feeling.
+#  PHYSICS ENGINE — hukum kuantitatif yang teruji
+#  1. Square-root impact law (Bouchaud dkk): impact% = Y·σd·√(pos/ADV)
+#     → biaya dorong harga masuk cost model + gate partisipasi ≤2% ADV
+#  2. Volatility clustering (Engle / RiskMetrics EWMA λ=0.94)
+#     → forecast σ harian besok, dipakai utk impact & sizing stop
+#  3. Fat tails / power law: p99 vs 2.33σ Gaussian, excess kurtosis
+#     → tail multiplier, warning stop, dan alasan HALF-Kelly
+#  4. Momentum & horizon: IQ daily (3.1) + bukti empiris T+1/3/5 di Journal
+#  5. Kelly criterion: f* = W − (1−W)/R dari outcome realisasi Journal
+# ════════════════════════════════════════════════════
+def ewma_sigma_daily(df_daily, lam=0.94):
+    """Vol clustering: forecast σ harian (%) via EWMA RiskMetrics."""
+    try:
+        c = df_daily["Close"].astype(float).values
+        c = c[c > 0]
+        if len(c) < 15: return None
+        r = np.diff(np.log(c))
+        var = float(np.var(r[:10])) if len(r) >= 10 else float(r[0] ** 2)
+        for x in r[10:]:
+            var = lam * var + (1 - lam) * x * x
+        s = float(np.sqrt(max(var, 0)) * 100)
+        return s if s > 0 else None
+    except: return None
+
+def tail_stats_daily(df_daily):
+    """Fat tails: seberapa gemuk ekor return saham ini vs Gaussian."""
+    try:
+        c = df_daily["Close"].astype(float).values
+        c = c[c > 0]
+        if len(c) < 30: return None
+        r = np.diff(c) / c[:-1] * 100
+        m = float(np.mean(r)); sd = float(np.std(r))
+        if sd <= 0: return None
+        worst = float(np.min(r)); p99 = float(np.percentile(np.abs(r), 99))
+        gauss99 = 2.326 * sd
+        kurt = float(np.mean((r - m) ** 4) / max(sd ** 4, 1e-12) - 3.0)
+        return {"sigma": sd, "worst": worst, "p99": p99,
+                "tail_mult": p99 / max(gauss99, 1e-9), "kurt": kurt}
+    except: return None
+
+def adv20_rp(df_daily, fallback=0.0):
+    """Average Daily Value 20 hari (Rp) — penyebut √impact."""
+    try:
+        d = df_daily.tail(20)
+        v = (d["Close"].astype(float) * d["Volume"].astype(float))
+        v = v[v > 0]
+        if len(v) >= 5: return float(v.mean())
+    except: pass
+    return float(fallback or 0.0)
+
+def sqrt_impact(pos_rp, adv_rp, sigma_daily_pct, Y=1.0):
+    """Square-root law: (impact %, partisipasi % ADV)."""
+    try:
+        if not adv_rp or adv_rp <= 0 or not sigma_daily_pct: return None, None
+        part = float(pos_rp) / float(adv_rp)
+        return round(Y * sigma_daily_pct * math.sqrt(max(part, 0)), 3), round(part * 100, 2)
+    except: return None, None
+
+def kelly_fraction(win_rate, avg_win, avg_loss):
+    """Kelly f* = W − (1−W)/R. Pakai HALF-Kelly (fat tails + estimasi noisy)."""
+    try:
+        if avg_loss <= 0 or avg_win <= 0: return None
+        R = avg_win / avg_loss
+        return float(win_rate - (1 - win_rate) / R)
+    except: return None
+
+# ════════════════════════════════════════════════════
+#  SIGNAL LOG — Fix #6 + Fix #10: Google Sheets persistence
+#  Backend: GSheet kalau secrets ada (persistent, anti-redeploy),
+#  fallback CSV lokal. Batch append = 1x API call per scan.
+#  Setup: [gcp_service_account] + GSHEET_SIGNAL_LOG_ID di secrets,
+#  share sheet ke client_email service account, requirements: gspread google-auth
 # ════════════════════════════════════════════════════
 SIGNAL_LOG = CACHE_DIR / "signal_log.csv"
 _SIGLOG_COLS = ["ts","date","ticker","mode","score","signal","sinyal_v2",
                 "mesin_grade","mesin_score","iq_verdict","iq_score","price",
                 "atr_pct","rvol","rsi_ema","above_vwap","ema_stack","roc_atr",
-                "src","cost_pct","t1_ret","t3_ret","t5_ret"]
+                "src","cost_pct","sigma_d","impact_pct","part_pct",
+                "t1_ret","t3_ret","t5_ret"]
+_SIGLOG_NUM = ["score","mesin_score","iq_score","price","atr_pct","rvol","rsi_ema",
+               "above_vwap","ema_stack","roc_atr","cost_pct","sigma_d","impact_pct",
+               "part_pct","t1_ret","t3_ret","t5_ret"]
 _siglog_lock = threading.Lock()
 
+def _gsheet_ws():
+    """Worksheet 'signal_log' di Google Sheets — None kalau ga dikonfigurasi."""
+    if "_gs_ws" in st.session_state:
+        return st.session_state["_gs_ws"]
+    ws = None
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sid = str(_get_secret("GSHEET_SIGNAL_LOG_ID"))
+        info = None
+        try: info = dict(st.secrets["gcp_service_account"])
+        except Exception: info = None
+        if sid and info:
+            creds = Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+            gc = gspread.authorize(creds)
+            sh = gc.open_by_key(sid)
+            try:
+                ws = sh.worksheet("signal_log")
+            except Exception:
+                ws = sh.add_worksheet("signal_log", rows=4000, cols=len(_SIGLOG_COLS))
+                ws.append_row(_SIGLOG_COLS)
+            try:  # upgrade header schema lama otomatis
+                hdr = ws.row_values(1)
+                if hdr != _SIGLOG_COLS:
+                    ws.update("A1", [_SIGLOG_COLS])
+            except Exception: pass
+    except Exception:
+        ws = None
+    st.session_state["_gs_ws"] = ws
+    return ws
+
+def siglog_backend():
+    return "☁️ GSheets" if _gsheet_ws() is not None else "💾 CSV lokal"
+
+def _df_align(df):
+    for c in _SIGLOG_COLS:
+        if c not in df.columns: df[c] = np.nan
+    df = df[_SIGLOG_COLS]
+    for c in _SIGLOG_NUM:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
 def load_signal_log():
+    ws = _gsheet_ws()
+    if ws is not None:
+        try:
+            vals = ws.get_all_values()
+            if len(vals) >= 2:
+                df = pd.DataFrame(vals[1:], columns=vals[0]).replace("", np.nan)
+                return _df_align(df)
+            return pd.DataFrame(columns=_SIGLOG_COLS)
+        except Exception: pass
     try:
         if SIGNAL_LOG.exists():
-            return pd.read_csv(SIGNAL_LOG)
+            return _df_align(pd.read_csv(SIGNAL_LOG))
     except: pass
     return pd.DataFrame(columns=_SIGLOG_COLS)
 
-def log_signal(row):
-    """Append 1 sinyal ke log. Dedupe: ticker+date+mode (anti auto-refresh spam)."""
+def save_signal_log(df):
+    df = _df_align(df.copy())
     try:
-        with _siglog_lock:
-            df = load_signal_log()
-            if not df.empty:
-                dup = df[(df["ticker"].astype(str)==str(row["ticker"])) &
-                         (df["date"].astype(str)==str(row["date"])) &
-                         (df["mode"].astype(str)==str(row["mode"]))]
-                if len(dup) > 0: return False
-            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-            df.to_csv(SIGNAL_LOG, index=False)
+        with _siglog_lock: df.to_csv(SIGNAL_LOG, index=False)  # mirror lokal selalu
+    except: pass
+    ws = _gsheet_ws()
+    if ws is not None:
+        try:
+            body = [_SIGLOG_COLS] + df.fillna("").astype(str).values.tolist()
+            ws.clear(); ws.update("A1", body)
             return True
-    except: return False
+        except Exception: return False
+    return True
+
+def log_signals_batch(rows):
+    """Append N sinyal sekaligus (1x API call), dedupe ticker+date+mode."""
+    if not rows: return 0
+    try:
+        df = load_signal_log()
+        existing = set()
+        if not df.empty:
+            existing = set(zip(df["ticker"].astype(str), df["date"].astype(str), df["mode"].astype(str)))
+        new = [r for r in rows if (str(r["ticker"]), str(r["date"]), str(r["mode"])) not in existing]
+        if not new: return 0
+        ndf = _df_align(pd.DataFrame(new))
+        allf = pd.concat([df, ndf], ignore_index=True) if not df.empty else ndf
+        try:
+            with _siglog_lock: _df_align(allf).to_csv(SIGNAL_LOG, index=False)
+        except: pass
+        ws = _gsheet_ws()
+        if ws is not None:
+            try: ws.append_rows(ndf.fillna("").astype(str).values.tolist())
+            except Exception: pass
+        return len(new)
+    except Exception: return 0
+
+def log_signal(row):
+    return log_signals_batch([row]) > 0
 
 def _fetch_daily_for_outcome(ticker):
     df = None
@@ -187,11 +340,11 @@ def update_signal_outcomes(max_tickers=40):
             closes = dfd["Close"].astype(float)
             ddates = [pd.Timestamp(x).date() for x in dfd.index]
         except: continue
-        for idx in pend[pend["ticker"].astype(str)==tkr].index:
+        for idx in pend[pend["ticker"].astype(str) == tkr].index:
             try:
                 sdate = pd.Timestamp(df.loc[idx, "date"]).date()
                 entry = float(df.loc[idx, "price"])
-                cost  = float(df.loc[idx, "cost_pct"])
+                cost = float(df.loc[idx, "cost_pct"])
                 if entry <= 0: continue
                 pos = next((i for i, d0 in enumerate(ddates) if d0 > sdate), None)
                 if pos is None: continue
@@ -204,10 +357,8 @@ def update_signal_outcomes(max_tickers=40):
                 if not np.isnan(r3): df.loc[idx, "t3_ret"] = r3
                 if not np.isnan(r5): df.loc[idx, "t5_ret"] = r5
             except: continue
-    try:
-        with _siglog_lock: df.to_csv(SIGNAL_LOG, index=False)
-    except: pass
-    return updated, f"{updated} outcome T+1 di-update (T+3/T+5 mengikuti umur sinyal)."
+    save_signal_log(df)
+    return updated, f"{updated} outcome T+1 di-update — tersimpan ke {siglog_backend()}."
 
 # ════════════════════════════════════════════════════
 #  DATASECTORS FETCH — THREAD-SAFE
@@ -1363,8 +1514,8 @@ st.markdown(f"""<div style="background:rgba(0,0,0,.4);border:1px solid {rcolor}4
   </div>
 </div>""", unsafe_allow_html=True)
 
-tab_scanner,tab_watchlist,tab_bsjp,tab_sector,tab_gapup,tab_trail,tab_backtest,tab_journal=st.tabs(
-    ["🔥 Scanner","👁️ Watchlist","🌙 BSJP","🏭 Sektor","📈 Gap Up","🎯 Trailing Stop","📊 Backtest","📓 Journal"])
+tab_scanner,tab_watchlist,tab_bsjp,tab_sector,tab_gapup,tab_trail,tab_backtest,tab_sizing,tab_journal=st.tabs(
+    ["🔥 Scanner","👁️ Watchlist","🌙 BSJP","🏭 Sektor","📈 Gap Up","🎯 Trailing Stop","📊 Backtest","🧮 Sizing","📓 Journal"])
 
 # ════ TAB SCANNER ════
 with tab_scanner:
@@ -1417,6 +1568,8 @@ with tab_scanner:
                 liq_window = st.slider("Volume Window", 10, 60, 20, 5, key="liq_window")
 
             min_turn=st.number_input("Min Turnover (M Rp)",value=100,step=100,key="trn")*1_000_000
+            # ── Physics: modal per posisi → √impact cost + gate partisipasi ADV ──
+            pos_size_jt=st.number_input("Modal per Posisi (Jt Rp) — √impact",value=5,step=1,key="pos_size_jt")
 
         with sc3:
             st.markdown('<div class="settings-label">TAMPILAN</div>',unsafe_allow_html=True)
@@ -1563,7 +1716,7 @@ with tab_scanner:
             results=[]; tickers=list(data_dict.keys())
             daily_dict=st.session_state.get("daily_dict",{})
             skip_reasons={"short":0,"price0":0,"turnover":0,"score":0,"liq_turn":0,"liq_nonzero":0,"liq_atr":0,"error":0}
-            last_err=[""]
+            last_err=[""]; _sig_batch=[]
 
             for i,ticker_yf in enumerate(tickers):
                 pb.progress(0.85+(i+1)/max(len(tickers),1)*0.14)
@@ -1667,6 +1820,14 @@ with tab_scanner:
                     mg, mg_col, ms = calc_mesin_grade(
                         sc, sig+"|"+sig_v2, iq["iq_score"], iq["iq_verdict"], iq["iq_bagger"])
 
+                    # ── PHYSICS: EWMA σ (vol clustering) + √impact (Bouchaud) ──
+                    sigma_d = ewma_sigma_daily(df_d)
+                    adv_rp = adv20_rp(df_d, fallback=turnover)
+                    impact_pct, part_pct = sqrt_impact(float(pos_size_jt)*1e6, adv_rp, sigma_d)
+                    tot_cost = round(trade_cost_pct(close) + (impact_pct or 0), 2)
+                    if part_pct is not None and part_pct > 2.0:
+                        reasons.append(f"⚠️ Posisi {part_pct:.1f}% ADV — >2%, √impact mahal, cicil entry")
+
                     results.append({
                         "Ticker":stock_map.get(ticker_yf,ticker_raw),"Price":_si(close),"Score":sc,
                         "Signal":sig,"Sinyal_v2":sig_v2,"Aksi_v2":aksi_v2,
@@ -1683,7 +1844,10 @@ with tab_scanner:
                         "FNet3":_si(fnet3),"FNet8":_si(fnet8),"FRatio":round(fratio,2),
                         "sc_v2":sc_v2,"gc_now":gc_now,
                         "Src":src_tag,
-                        "Cost%":round(trade_cost_pct(close),2),
+                        "Cost%":tot_cost,
+                        "Impact%":round(impact_pct,2) if impact_pct is not None else 0.0,
+                        "Part%":part_pct if part_pct is not None else 0.0,
+                        "Sigma_d":round(sigma_d,2) if sigma_d else 0.0,
                         "IQ_Score":round(iq["iq_score"],1),
                         "IQ_Verdict":iq["iq_verdict"],
                         "IQ_MA":iq["iq_ma"],
@@ -1695,10 +1859,10 @@ with tab_scanner:
                         "Mesin_Score":round(ms,1),
                     })
 
-                    # ── Fix #6: LOG SINYAL — falsifiability. Tiap sinyal = 1 row, outcome menyusul ──
+                    # ── Fix #6+#10: LOG SINYAL — batch, outcome menyusul via Journal ──
                     try:
                         _roc3_15=_sff(r.get("ROC3",0))*100
-                        log_signal({
+                        _sig_batch.append({
                             "ts": now_jkt.strftime("%H:%M:%S"),
                             "date": now_jkt.strftime("%Y-%m-%d"),
                             "ticker": ticker_raw, "mode": scan_mode,
@@ -1711,7 +1875,10 @@ with tab_scanner:
                             "ema_stack": int(e9>e21>e50),
                             "roc_atr": round(_roc3_15/max(_atrp,0.05),2),
                             "src": src_tag,
-                            "cost_pct": round(trade_cost_pct(close),2),
+                            "cost_pct": tot_cost,
+                            "sigma_d": round(sigma_d,2) if sigma_d else np.nan,
+                            "impact_pct": round(impact_pct,3) if impact_pct is not None else np.nan,
+                            "part_pct": part_pct if part_pct is not None else np.nan,
                             "t1_ret": np.nan, "t3_ret": np.nan, "t5_ret": np.nan,
                         })
                     except: pass
@@ -1719,6 +1886,8 @@ with tab_scanner:
                     skip_reasons["error"]+=1
                     last_err[0]=f"{type(_exc).__name__}: {str(_exc)[:80]}"
                     continue
+            try: _n_logged=log_signals_batch(_sig_batch)
+            except Exception: _n_logged=0
             pb.progress(1.0); prog_ph.empty(); pb.empty()
             st.session_state.scan_results=results
             st.session_state.last_scan_time=now_jkt.timestamp()
@@ -1741,7 +1910,7 @@ with tab_scanner:
                     f"**Saran:** turunkan Min Score → 0, Min Turnover → 0, Min RVOL → 0 di settings."
                 )
             else:
-                st.success(f"✅ {len(results)} sinyal ditemukan dari {len(data_dict)} saham! 📓 Otomatis ke-log di tab Journal.")
+                st.success(f"✅ {len(results)} sinyal dari {len(data_dict)} saham · 📓 {_n_logged} baru ke Journal [{siglog_backend()}]")
             if tele_on and results:
                 if "tt_last_sent" not in st.session_state: st.session_state.tt_last_sent=set()
                 dft=pd.DataFrame(results).sort_values("Mesin_Score",ascending=False)
@@ -1996,7 +2165,7 @@ with tab_scanner:
             ch+='</div>'; st.markdown(ch, unsafe_allow_html=True)
 
         st.markdown('<div class="section-title">Full Signal Table — MESIN PRESISI x 151 STRATEGIES</div>', unsafe_allow_html=True)
-        col_headers=["EMITEN","GRADE","MS","AKSI","SINYAL 15M","IQ DAILY","IQ SCORE","IQ MA","IQ BAG","RVOL","GAIN","NOW","TP","SL","PROFIT","COST","RSI","TURNOVER","ASING","SRC"]
+        col_headers=["EMITEN","GRADE","MS","AKSI","SINYAL 15M","IQ DAILY","IQ SCORE","IQ MA","IQ BAG","RVOL","GAIN","NOW","TP","SL","PROFIT","COST","IMP%","RSI","TURNOVER","ASING","SRC"]
         header_html="".join(f'<th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533;white-space:nowrap">{h}</th>' for h in col_headers)
         rows_html=""
         for _,row in df_out.head(50).iterrows():
@@ -2036,6 +2205,7 @@ with tab_scanner:
                 f'<td style="padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center">{int(sl_v):,}</td>'
                 f'<td style="padding:5px 6px;color:#00ff88;border-bottom:1px solid #1c2533;text-align:center">{pp_net:.1f}%</td>'
                 f'<td style="padding:5px 6px;color:#ffb700;border-bottom:1px solid #1c2533;text-align:center">{cost_v:.2f}%</td>'
+                f'<td style="padding:5px 6px;color:{"#ff3d5a" if float(row.get("Part%",0) or 0)>2 else "#4a5568"};border-bottom:1px solid #1c2533;text-align:center;font-size:9px">{float(row.get("Impact%",0) or 0):.2f} ({float(row.get("Part%",0) or 0):.1f}%ADV)</td>'
                 f'<td style="padding:5px 6px;color:{rsi_c};border-bottom:1px solid #1c2533;text-align:center">{rsi_v:.0f}</td>'
                 f'<td style="padding:5px 6px;color:#4a5568;font-size:9px;border-bottom:1px solid #1c2533;text-align:center">{row.get("Turnover(M)",0):.0f}M</td>'
                 f'<td style="padding:5px 6px;color:{fc};border-bottom:1px solid #1c2533;text-align:center;font-size:10px">{fd}</td>'
@@ -2439,6 +2609,82 @@ with tab_backtest:
                   <div style="margin-top:10px;font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">t-stat expectancy: {tstat:.2f} → {sig_lbl}</div>
                 </div>""",unsafe_allow_html=True)
 
+
+# ════ TAB SIZING — Kelly × √Impact × Fat Tails ════
+with tab_sizing:
+    st.markdown('<div class="section-title">🧮 Position Sizing Engine — 3 Cap: Risk · Kelly · √Impact</div>',unsafe_allow_html=True)
+    st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #bf5fff;">Ukuran posisi final = <b style="color:#00ff88">MIN</b> dari 3 batas: <b>RISK</b> (rugi max per trade), <b>KELLY</b> (half-Kelly dari expectancy Journal), <b>IMPACT</b> (≤2% ADV, square-root law). σ dari EWMA λ=0.94 (vol clustering), stop di-warning kalau di dalam jangkauan p99 (fat tails).</div>',unsafe_allow_html=True)
+    sz1,sz2,sz3,sz4=st.columns(4)
+    sz_ticker=sz1.text_input("Ticker",value="BBCA",key="sz_ticker").upper().strip()
+    sz_modal=sz2.number_input("Total Modal (Jt Rp)",value=100,step=10,min_value=1,key="sz_modal")
+    sz_risk=sz3.number_input("Risk per Trade %",value=1.0,step=0.25,min_value=0.1,key="sz_risk")
+    sz_slm=sz4.number_input("SL (× σ harian)",value=1.5,step=0.25,min_value=0.5,key="sz_slm")
+    if st.button("🧮 HITUNG SIZING",type="primary",use_container_width=True,key="btn_sizing"):
+        df_sz=None
+        try:
+            if DS_KEY: df_sz=fetch_ds_ohlcv(sz_ticker,"daily",120,False)
+            if df_sz is None: df_sz=_fetch_yf_ticker(sz_ticker+".JK","6mo","1d")
+        except: pass
+        if df_sz is None or len(df_sz)<30:
+            st.error(f"Data daily {sz_ticker} gak cukup (butuh ≥30 hari)")
+        else:
+            close_sz=float(df_sz["Close"].iloc[-1])
+            sig_d=ewma_sigma_daily(df_sz) or 1.0
+            ts_=tail_stats_daily(df_sz)
+            adv=adv20_rp(df_sz)
+            modal_rp=float(sz_modal)*1e6; risk_rp=modal_rp*float(sz_risk)/100.0
+            stop_pct=float(sz_slm)*sig_d
+            # ── Cap 1: RISK — rugi max kalau SL kena ──
+            size_risk=risk_rp/max(stop_pct/100.0,1e-6)
+            # ── Cap 2: IMPACT — partisipasi ≤2% ADV (square-root law) ──
+            size_impact=0.02*adv if adv>0 else size_risk
+            # ── Cap 3: KELLY — half-Kelly dari outcome T+3 Journal (kalau ada) ──
+            size_kelly=None; kelly_note="Journal belum punya ≥10 outcome — Kelly cap belum aktif."
+            try:
+                _jd=load_signal_log(); _done=_jd.dropna(subset=["t3_ret"])
+                if len(_done)>=10:
+                    _w=float((_done["t3_ret"]>0).mean())
+                    _wins=_done[_done["t3_ret"]>0]["t3_ret"]; _loss=_done[_done["t3_ret"]<=0]["t3_ret"]
+                    _aw=float(_wins.mean()) if len(_wins) else 0.0
+                    _al=float(-_loss.mean()) if len(_loss) else 0.0
+                    _f=kelly_fraction(_w,_aw,_al)
+                    if _f is not None:
+                        if _f<=0:
+                            size_kelly=0.0
+                            kelly_note=f"⚠️ Kelly f*={_f*100:.1f}% NEGATIF (W={_w:.0%}, R={_aw/max(_al,0.01):.2f}) — expectancy sistem masih minus, jangan naikin size."
+                        else:
+                            size_kelly=(_f/2.0)*modal_rp
+                            kelly_note=f"Half-Kelly = {_f/2*100:.1f}% modal (f*={_f*100:.1f}%, W={_w:.0%}, N={len(_done)})"
+            except: pass
+            caps=[("RISK",size_risk),("IMPACT ≤2% ADV",size_impact)]
+            if size_kelly is not None: caps.append(("HALF-KELLY",size_kelly))
+            binding=min(caps,key=lambda x:x[1])
+            rec_rp=max(binding[1],0.0)
+            lots=int(rec_rp/max(close_sz*100.0,1))
+            rec_real=lots*close_sz*100.0
+            imp_rec,part_rec=sqrt_impact(rec_real,adv,sig_d)
+            tail_warn=(ts_ is not None and stop_pct < ts_["p99"])
+            tw_col="#ff3d5a" if tail_warn else "#00ff88"
+            tm=ts_["tail_mult"] if ts_ else 1.0
+            st.markdown(f"""<div class="metric-row" style="margin-top:14px;">
+              <div class="metric-card"><div class="metric-label">{sz_ticker} Now</div><div class="metric-value" style="color:#00e5ff">{close_sz:,.0f}</div><div class="metric-sub">σd EWMA: {sig_d:.2f}%</div></div>
+              <div class="metric-card green"><div class="metric-label">✅ REKOMENDASI</div><div class="metric-value" style="color:#00ff88">{lots} lot</div><div class="metric-sub">Rp {rec_real:,.0f} · binding: {binding[0]}</div></div>
+              <div class="metric-card amber"><div class="metric-label">Stop Distance</div><div class="metric-value" style="color:{tw_col}">{stop_pct:.2f}%</div><div class="metric-sub">SL ~{close_sz*(1-stop_pct/100):,.0f}</div></div>
+              <div class="metric-card purple"><div class="metric-label">Impact @ size</div><div class="metric-value" style="color:#bf5fff">{(imp_rec or 0):.3f}%</div><div class="metric-sub">{(part_rec or 0):.2f}% ADV (ADV {adv/1e9:.2f}B)</div></div>
+            </div>""",unsafe_allow_html=True)
+            cap_rows="".join([f'<div class="sc-stat">{n}: <span style="color:{"#00ff88" if n==binding[0] else "#c9d1d9"}">Rp {v:,.0f}</span></div>' for n,v in caps])
+            st.markdown(f"""<div style="background:#0d1117;border:1px solid #1c2533;border-radius:8px;padding:14px 18px;">
+              <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;letter-spacing:1px;margin-bottom:8px;">3 CAPS (yang terkecil = binding)</div>
+              <div class="sc-stats">{cap_rows}</div>
+              <div style="margin-top:10px;font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">🎲 {kelly_note}</div>
+              <div style="margin-top:6px;font-family:Space Mono,monospace;font-size:10px;color:{tw_col};">
+                {"⚠️ FAT TAILS: stop "+f"{stop_pct:.2f}%"+" masih DI DALAM jangkauan p99 ("+f"{ts_['p99']:.2f}%"+") — gap bisa lewatin SL lu. Pertimbangkan size lebih kecil atau stop lebih lebar." if tail_warn else "✅ Stop di luar jangkauan p99 harian ("+(f"{ts_['p99']:.2f}%" if ts_ else "—")+")"}
+              </div>
+              <div style="margin-top:6px;font-family:Space Mono,monospace;font-size:9px;color:#4a5568;">
+                Tail profile: p99 |move| = {(ts_['p99'] if ts_ else 0):.2f}% · worst 1D = {(ts_['worst'] if ts_ else 0):.2f}% · tail multiplier vs Gaussian = {tm:.2f}x · excess kurtosis = {(ts_['kurt'] if ts_ else 0):.1f} {"(EKOR GEMUK — Gaussian underprice risiko ini)" if tm>1.3 else ""}
+              </div>
+            </div>""",unsafe_allow_html=True)
+
 # ════ TAB JOURNAL — Fix #6: falsifiability engine ════
 with tab_journal:
     st.markdown('<div class="section-title">📓 Signal Journal — Expectancy per Setup, dari DATA</div>',unsafe_allow_html=True)
@@ -2454,6 +2700,33 @@ with tab_journal:
             jdf = load_signal_log()
     with jc1: st.metric("Total Sinyal Ter-log", len(jdf))
     with jc2: st.metric("Punya Outcome T+3", int(jdf["t3_ret"].notna().sum()) if not jdf.empty else 0)
+
+    _be = siglog_backend()
+    if "GSheets" in _be:
+        st.caption("☁️ Storage: **Google Sheets** — persistent, aman dari redeploy/restart ✅")
+    else:
+        st.warning("💾 Storage: CSV lokal /tmp — di Streamlit Cloud data ini **HILANG saat redeploy/restart**! Setup Google Sheets di bawah (5 menit, sama kayak Casper Scanner).")
+        with st.expander("⚙️ Setup Google Sheets persistence"):
+            st.markdown("""
+1. **GCP Console** → IAM & Admin → Service Accounts → buat baru → Keys → **JSON** → download
+2. **requirements.txt** tambah 2 baris: `gspread` dan `google-auth` → push → redeploy
+3. **Buat Google Sheet kosong** → copy **spreadsheet ID** dari URL (`/d/<ID>/edit`)
+4. **Share** sheet ke `client_email` yang ada di JSON (akses **Editor**)
+5. **Streamlit secrets** tambahkan:
+```toml
+GSHEET_SIGNAL_LOG_ID = "spreadsheet_id_lu"
+
+[gcp_service_account]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = \"\"\"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n\"\"\"
+client_email = "...@....iam.gserviceaccount.com"
+client_id = "..."
+token_uri = "https://oauth2.googleapis.com/token"
+```
+6. Reboot app → caption di atas berubah jadi ☁️ GSheets, worksheet `signal_log` dibuat otomatis
+""")
 
     if not jdf.empty:
         done = jdf.dropna(subset=["t3_ret"]).copy()
@@ -2472,6 +2745,26 @@ with tab_journal:
 
             st.markdown('<div class="section-title">Expectancy per Mesin Grade (% net cost)</div>',unsafe_allow_html=True)
             st.dataframe(_exp_table("mesin_grade"),use_container_width=True,hide_index=True)
+
+            st.markdown('<div class="section-title">🎲 Kelly Sizing per Grade (dari outcome T+3 net)</div>',unsafe_allow_html=True)
+            krows=[]
+            for _g,_sub in done.groupby("mesin_grade"):
+                if len(_sub)<10: continue
+                _w=float((_sub["t3_ret"]>0).mean())
+                _wins=_sub[_sub["t3_ret"]>0]["t3_ret"]; _loss=_sub[_sub["t3_ret"]<=0]["t3_ret"]
+                _aw=float(_wins.mean()) if len(_wins) else 0.0
+                _al=float(-_loss.mean()) if len(_loss) else 0.0
+                _f=kelly_fraction(_w,_aw,_al)
+                krows.append({"Grade":_g,"N":len(_sub),"Win%":round(_w*100,1),
+                    "AvgWin%":round(_aw,2),"AvgLoss%":round(_al,2),
+                    "R (W/L)":round(_aw/max(_al,0.01),2),
+                    "Kelly f*%":round(_f*100,1) if _f is not None else None,
+                    "Half-Kelly %modal":round(max(_f,0)/2*100,1) if _f is not None else None})
+            if krows:
+                st.dataframe(pd.DataFrame(krows).sort_values("Kelly f*%",ascending=False),use_container_width=True,hide_index=True)
+                st.caption("Pakai HALF-Kelly (fat tails + estimasi noisy). f* NEGATIF = grade itu jangan ditrade sama sekali — expectancy-nya minus.")
+            else:
+                st.caption("🎲 Kelly per grade butuh ≥10 outcome per grade — biarkan mesin nabung dulu.")
 
             st.markdown('<div class="section-title">Expectancy per Mode Scan</div>',unsafe_allow_html=True)
             st.dataframe(_exp_table("mode"),use_container_width=True,hide_index=True)
@@ -2510,7 +2803,7 @@ with tab_journal:
             csv_bytes = jdf.to_csv(index=False).encode()
             st.download_button("⬇️ Download signal_log.csv (backup ke Obsidian/GitHub)",csv_bytes,"signal_log.csv","text/csv",key="dl_siglog")
         except: pass
-        st.caption("💾 Note: di Streamlit Cloud, /tmp bisa ke-reset saat redeploy — rajin download CSV sebagai backup, atau mount persistent storage.")
+        st.caption(f"Storage aktif: {siglog_backend()} · Download CSV tetap disarankan sebagai backup berkala ke Obsidian/GitHub.")
     else:
         st.markdown('<div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;"><div style="font-size:32px;margin-bottom:12px;">📓</div><div>JALANKAN SCANNER → SINYAL OTOMATIS KE-LOG DI SINI</div></div>',unsafe_allow_html=True)
 
