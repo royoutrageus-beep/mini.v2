@@ -655,7 +655,7 @@ def calc_mesin_grade(tt_score, tt_signal, iq_score, iq_verdict, iq_bagger):
 
     BANDAR 🔵   = TT BANDAR/HAKA/SUPER + IQ BUY      → smart money confirm
     PRESISI 🎯  = TT GACOR/REVERSAL + IQ BUY         → strong entry NOW
-    BAGGER 💎   = TT BAGGER/KANDIDAT + IQ Bagger ≥ 60→ accumulation
+    BAGGER 💎  = TT BAGGER/KANDIDAT + IQ Bagger ≥ 60→ accumulation
     KUAT ⚡     = TT POTENSIAL + IQ BUY, atau TT GACOR + IQ HOLD
     MONITOR 👁️  = IQ BUY tapi TT belum sempurna
     TT-ONLY 🔥  = TT signal kuat tapi IQ UNKNOWN (data daily kurang)
@@ -938,7 +938,6 @@ def get_market_regime():
         return ("UNKNOWN", 0, 0, 0, f"IHSG error: {str(e)[:40]}", 0.0)
 
 def get_regime_config(regime):
-    # Threshold realistis — sebelumnya terlalu ketat (min_rvol 2.0 = 90% saham gak lolos)
     return {
         "RED":     {"mode":"Reversal 🎯","min_score":3,"min_rvol":1.2,"sl_mult":0.6,
                     "label":"🔴 MARKET MERAH — Reversal Only, Score ≥ 3","color":"#ff3d5a",
@@ -953,11 +952,10 @@ def get_regime_config(regime):
                     "label":"⚪ REGIME UNKNOWN — Manual Mode","color":"#4a5568","desc":""},
     }.get(regime,{"mode":"Scalping ⚡","min_score":2,"min_rvol":1.0,"sl_mult":0.8,"label":"⚪","color":"#4a5568","desc":""})
 
-# ════ PIVOT — pakai Ticker().history() ════
 @st.cache_data(ttl=3600)
 def fetch_pivot_data(ticker_yf):
     try:
-        df = _fetch_yf_ticker(ticker_yf, "5d", "1d")  # ← no yf.download!
+        df = _fetch_yf_ticker(ticker_yf, "5d", "1d")
         if df is None or len(df) < 2: return None
         prev=df.iloc[-2]; h=float(prev["High"]); l=float(prev["Low"]); c=float(prev["Close"])
         pp=(h+l+c)/3
@@ -974,10 +972,8 @@ def get_pivot_position(price, pivots):
     elif price>pivots.get("S2",pp*0.98): return "S2→S1 🔴","#ff3d5a"
     else:                                 return "Below S2 🔴","#ff3d5a"
 
-# ════ SECTOR — pakai _fetch_yf_parallel ════
 @st.cache_data(ttl=300)
 def fetch_sector_rotation(sector_stocks):
-    """Parallel Ticker().history() — no yf.download(), no rate limit."""
     tickers_yf = [s+".JK" for s in sector_stocks[:10]]
     raw = _fetch_yf_parallel(tickers_yf, "3d", "1d", workers=5)
     results = []
@@ -991,10 +987,8 @@ def fetch_sector_rotation(sector_stocks):
         except: continue
     return results
 
-# ════ GAP UP — pakai _fetch_yf_parallel · Fix #5: gap dinormalisasi range harian ════
 @st.cache_data(ttl=300)
 def scan_gap_up(tickers_yf, min_gap_pct=0.5):
-    """Parallel Ticker().history() — no batched yf.download(), no rate limit."""
     raw = _fetch_yf_parallel(list(tickers_yf), "5d", "1d", workers=6)
     results = []
     for t, df in raw.items():
@@ -1005,7 +999,6 @@ def scan_gap_up(tickers_yf, min_gap_pct=0.5):
             close=float(today["Close"]); high_t=float(today["High"]); low_t=float(today["Low"])
             high_p=float(prev["High"]); vol=float(today["Volume"])
             avg_vol=float(df["Volume"].mean()); rvol=vol/avg_vol if avg_vol>0 else 1.0
-            # Fix #5: rata-rata range harian sbg proxy volatilitas → gap diukur relatif
             try:
                 rng_pct=float(((df["High"]-df["Low"])/df["Close"].replace(0,np.nan)).mean())*100
             except: rng_pct=2.0
@@ -1013,7 +1006,7 @@ def scan_gap_up(tickers_yf, min_gap_pct=0.5):
             gap_score=0; reasons=[]
             if close>high_p:
                 gap_pct=(close-high_p)/high_p*100
-                gap_r=gap_pct/rng_pct  # gap dlm satuan range harian (adil utk bluechip vs gorengan)
+                gap_r=gap_pct/rng_pct
                 if gap_r>0.5: gap_score+=3; reasons.append(f"Gap {gap_pct:.1f}% ({gap_r:.1f}R) ✦✦")
                 else:         gap_score+=1.5; reasons.append(f"Gap {gap_pct:.1f}% tipis vs vol dia")
             close_ratio=(close-low_t)/max(high_t-low_t,1)
@@ -1037,7 +1030,6 @@ def scan_gap_up(tickers_yf, min_gap_pct=0.5):
         except: continue
     return sorted(results, key=lambda x:x["Gap Score"], reverse=True)
 
-# ════ INDICATORS ════
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 
 def apply_intraday_indicators(df):
@@ -1063,7 +1055,6 @@ def apply_intraday_indicators(df):
     df["MACD_Hist"]=(macd_line-signal_line).fillna(0)
     df["MACD_CROSS_UP"]=(macd_line>signal_line)&(macd_line.shift(1)<=signal_line.shift(1))
     df["MACD_CROSS_DOWN"]=(macd_line<signal_line)&(macd_line.shift(1)>=signal_line.shift(1))
-    # ── Fix #4: SESSION VWAP — reset per hari trading, bukan cumulative 7 hari ──
     try:
         tp=(df["High"]+df["Low"]+df["Close"])/3
         _day=pd.Series(pd.to_datetime(df.index).date, index=df.index)
@@ -1074,7 +1065,6 @@ def apply_intraday_indicators(df):
     df["BB_mid"]=c.rolling(20).mean(); df["BB_std"]=c.rolling(20).std()
     df["BB_upper"]=df["BB_mid"]+2*df["BB_std"]; df["BB_lower"]=df["BB_mid"]-2*df["BB_std"]
     df["BB_pct"]=(c-df["BB_lower"])/(df["BB_upper"]-df["BB_lower"])
-    # ── Fix #7: AvgVol EXCLUDE bar sekarang (shift 1) → spike gak ke-dilute ──
     df["AvgVol"]=df["Volume"].rolling(20).mean().shift(1)
     df["RVOL"]=df["Volume"]/df["AvgVol"].replace(0,np.nan)
     tr=pd.concat([df["High"]-df["Low"],(df["High"]-c.shift()).abs(),(df["Low"]-c.shift()).abs()],axis=1).max(axis=1)
@@ -1100,7 +1090,6 @@ def apply_intraday_indicators(df):
         df["FRatio"]=(df["FBuy"]/tot.replace(0,np.nan)).fillna(0.5)
     return df
 
-# ════ SCORING ════
 def score_scalping(r, p, p2):
     score=0; reasons=[]
     if r["EMA9"]>r["EMA21"]>r["EMA50"]:  score+=1.5; reasons.append("EMA stack ▲")
@@ -1129,8 +1118,6 @@ def score_momentum(r, p, p2):
     if rvol>3.0:   score+=1.5; reasons.append(f"RVOL={rvol:.1f}x SURGE 🔥")
     elif rvol>2.0: score+=1.0; reasons.append(f"RVOL={rvol:.1f}x")
     elif rvol>1.5: score+=0.5
-    # ── Fix #5: ROC diukur dalam satuan ATR (volatilitas), bukan persen mentah ──
-    # ROC 2% di BBCA (ATR% ~0.3) = event besar; di gorengan (ATR% ~2) = noise.
     roc=float(r["ROC3"])*100
     try:
         _a=float(r.get("ATR",np.nan)); _c=float(r["Close"])
@@ -1192,8 +1179,6 @@ def score_bagger(r, p, p2, df_full):
         rh=float(df_full["High"].iloc[-sideways_bars-1:-1].max())
         rl=float(df_full["Low"].iloc[-sideways_bars-1:-1].min())
         rp=(rh-rl)/max(rl,0.01)*100
-        # ── Fix #5: sideways diukur dlm satuan ATR — self-normalizing per saham ──
-        # Random walk 20 bar ekspektasi range ~4.5×ATR; di bawah 5×ATR = kompresi beneran.
         _atr_now=_sf(r.get("ATR",0))
         if _atr_now>0: is_sideways=(rh-rl)<5.0*_atr_now
         else:          is_sideways=rp<8.0
@@ -1284,7 +1269,6 @@ def score_bagger(r, p, p2, df_full):
     return max(0,min(6,round(score,1))),reasons,{"wyckoff_phase":wyckoff_phase}
 
 def get_signal(score, mode):
-    # Threshold diturunin biar low-score juga dapet label (gak WAIT)
     t={"Scalping ⚡":{5:"GACOR ⚡",   4:"POTENSIAL 🔥",3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"},
        "Momentum 🚀":{5:"GACOR 🚀",   4:"POTENSIAL 🔥",3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"},
        "Reversal 🎯":{5:"REVERSAL 🎯",4:"POTENSIAL 🔥",3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"},
@@ -1402,7 +1386,7 @@ def get_sinyal_v2(r, p, p2):
     if is_rebound: return "REBOUND 🏀", score," · ".join(flags[:3]),gc_now
     if entry_mod and score>=20: return "AKUM 📦", score," · ".join(flags[:3]),gc_now
     if score>=15:  return "ON TRACK ✅",score," · ".join(flags[:3]),gc_now
-    return "WAIT ❌",score," · ".join(flags[:3]),gc_now
+    return "WAIT ❌", score," · ".join(flags[:3]),gc_now
 
 def get_aksi_v2(sinyal, gc_now, score):
     if "BANDAR" in sinyal or (("HAKA" in sinyal or "SUPER" in sinyal) and score>=35): return "AT ENTRY 🎯"
@@ -1412,10 +1396,8 @@ def get_aksi_v2(sinyal, gc_now, score):
     elif score>=15:           return "WAIT GC ⏳"
     else:                     return "WAIT ❌"
 
-# ════ FETCH INTRADAY — DS primary, yFinance fallback (anti-rate-limit) ════
 def fetch_intraday(tickers, interval="15m"):
     all_dfs={}; ticker_list=list(tickers)
-    # Step 1: cache first
     need_fetch=[]
     for t in ticker_list:
         raw_t=t.replace(".JK","").upper()
@@ -1423,7 +1405,6 @@ def fetch_intraday(tickers, interval="15m"):
         if cached is not None: all_dfs[t]=cached; continue
         need_fetch.append(t)
     if not need_fetch: return all_dfs
-    # Step 2: DS parallel (10 threads) — kalau DS_KEY ada
     if DS_KEY:
         def _fetch_one(t):
             raw_t=t.replace(".JK","").upper()
@@ -1437,7 +1418,6 @@ def fetch_intraday(tickers, interval="15m"):
                     if df is not None and len(df)>=20:
                         all_dfs[t]=df
                 except: pass
-    # Step 3: yFinance fallback — Ticker().history() parallel, no rate limit!
     missing_yf=[t for t in need_fetch if t not in all_dfs]
     if missing_yf:
         yf_data=_fetch_yf_parallel(missing_yf, "7d", interval, workers=5)
@@ -1556,8 +1536,6 @@ with tab_scanner:
                 min_score=st.slider("Min Score (0-6)",0,6,2,key="msc")
                 vol_thresh=st.slider("Min RVOL Spike",1.0,5.0,1.5,0.1,key="vol")
 
-            # ── Fix #8: Liquidity gate dlm NILAI (Rp), bukan lembar ──
-            # 100rb lembar saham Rp50 = Rp5jt/bar = tetap gak liquid. Nilai yang adil.
             only_liquid = st.toggle("✅ Only Liquid", value=True, key="only_liquid")
             liq_colA, liq_colB = st.columns([2, 1])
             with liq_colA:
@@ -1568,14 +1546,12 @@ with tab_scanner:
                 liq_window = st.slider("Volume Window", 10, 60, 20, 5, key="liq_window")
 
             min_turn=st.number_input("Min Turnover (M Rp)",value=100,step=100,key="trn")*1_000_000
-            # ── Physics: modal per posisi → √impact cost + gate partisipasi ADV ──
             pos_size_jt=st.number_input("Modal per Posisi (Jt Rp) — √impact",value=5,step=1,key="pos_size_jt")
 
         with sc3:
             st.markdown('<div class="settings-label">TAMPILAN</div>',unsafe_allow_html=True)
             view_mode=st.radio("View",["Card View 🃏","Table View 📊"],label_visibility="collapsed",key="vm")
             quick_mode=st.toggle("⚡ Quick (200 saham)",value=False,key="quick_mode")
-            # ── Fix #9: Auto-Scan Railway-style — scan saat dibuka + berkala via heartbeat ──
             auto_scan_on=st.toggle("🔄 Auto-Scan (saat dibuka + berkala)",value=True,key="auto_scan_on")
             auto_scan_sec=st.selectbox("Interval Auto-Scan",[300,600,900],index=2,
                 format_func=lambda s: f"{s//60} menit",key="auto_scan_sec")
@@ -1606,9 +1582,9 @@ with tab_scanner:
     if _auto_on and not do_scan_btn:
         _lst=st.session_state.last_scan_time
         if _lst is None:
-            auto_trigger=True   # fresh open → langsung scan (Railway-style)
+            auto_trigger=True
         elif _now_check-_lst>=_auto_sec:
-            auto_trigger=True   # interval lewat → scan ulang
+            auto_trigger=True
 
     if do_scan_btn or auto_trigger:
         scan_list=stocks_yf[:200] if quick_mode else stocks_yf
@@ -1618,7 +1594,6 @@ with tab_scanner:
         data_dict={}
         try:
             ticker_list=list(scan_list)
-            # ─ Step 1: DS cache check ─
             need_fetch=[]
             for t in ticker_list:
                 raw_t=t.replace(".JK","").upper()
@@ -1628,7 +1603,6 @@ with tab_scanner:
             n_cached=len(data_dict); n_need=len(need_fetch)
             prog_ph.markdown(f'<div style="color:#ff7b00;font-family:Space Mono,monospace;font-size:11px;">⚡ {n_cached} dari cache · {n_need} perlu fetch...</div>',unsafe_allow_html=True)
 
-            # ─ Step 2: DS parallel fetch ─
             def _f(t):
                 raw_t=t.replace(".JK","").upper()
                 if DS_KEY:
@@ -1648,7 +1622,6 @@ with tab_scanner:
                                 pb.progress(min(pct,0.50))
                         except: done_count[0]+=1
 
-            # ─ Step 3: yFinance fallback — Ticker().history() PARALLEL, no rate limit ─
             missing_yf=[t for t in ticker_list if t not in data_dict]
             if missing_yf:
                 prog_ph.markdown(f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">📊 yFinance fallback: {len(missing_yf)} ticker → Ticker().history() parallel...</div>',unsafe_allow_html=True)
@@ -1667,14 +1640,14 @@ with tab_scanner:
             if len(data_dict)==0:
                 st.error("⚠️ 0 saham berhasil di-fetch. Lihat diagnostik di bawah.")
                 with st.expander("🔧 DIAGNOSTIK — klik untuk cek koneksi", expanded=True):
-                    st.code(f"yfinance version: {yf.__version__}\nPython workers: {4}\nTickers target: {len(ticker_list)}\nContoh ticker: {ticker_list[:3] if ticker_list else 'KOSONG!'}")
+                    st.code(f"yfinance version: {yf.__version__}\\nPython workers: {4}\\nTickers target: {len(ticker_list)}\\nContoh ticker: {ticker_list[:3] if ticker_list else 'KOSONG!'}")
                     st.caption("Test fetch BBCA.JK...")
                     _test_df = _fetch_yf_ticker("BBCA.JK", "5d", "1d")
                     if _test_df is not None:
                         st.success(f"✅ BBCA.JK OK — {len(_test_df)} rows, cols: {_test_df.columns.tolist()}")
                         st.caption("yFinance bisa fetch data. Kemungkinan masalah di paralel. Coba SCAN lagi.")
                     else:
-                        st.error("❌ BBCA.JK juga gagal! Cek:\n- Internet Streamlit Cloud OK?\n- Coba tambahkan `yfinance==0.2.61` di requirements.txt")
+                        st.error("❌ BBCA.JK juga gagal! Cek:\\n- Internet Streamlit Cloud OK?\\n- Coba tambahkan `yfinance==0.2.61` di requirements.txt")
                     try:
                         _td2 = yf.download("BBCA.JK","5d","1d",progress=False,threads=False)
                         if not _td2.empty:
@@ -1686,7 +1659,6 @@ with tab_scanner:
                 st.stop()
             pb.progress(0.78)
 
-            # ─ Step 4: Daily context — DS dulu, yFinance fallback parallel ─
             daily_dict={}
             if DS_KEY:
                 def _fd(t):
@@ -1710,7 +1682,6 @@ with tab_scanner:
                         daily_dict[t_d]=df_d
             st.session_state.daily_dict=daily_dict
 
-            # ─ Step 5: Process signals ─
             pb.progress(0.85)
             prog_ph.markdown(f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">⚙️ Processing {len(data_dict)} saham...</div>',unsafe_allow_html=True)
             results=[]; tickers=list(data_dict.keys())
@@ -1723,7 +1694,6 @@ with tab_scanner:
                 try:
                     df=data_dict[ticker_yf].copy()
                     if len(df)<30: skip_reasons["short"]+=1; continue
-                    # ── Fix #7: tag sumber data — skor DS (punya FBuy) vs YF beda ketersediaan fitur ──
                     src_tag="DS" if "FBuy" in df.columns else "YF"
                     df=apply_intraday_indicators(df)
                     r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3] if len(df)>=3 else p
@@ -1738,10 +1708,9 @@ with tab_scanner:
                     close=_sff(r.get("Close",0)); vol=_sff(r.get("Volume",0))
                     if close<=0: skip_reasons["price0"]+=1; continue
 
-                    # ── Fix #8: Liquidity gate dlm NILAI turnover per bar ──
                     if only_liquid:
                         avg_vol_val = _sff(r.get("AvgVol", 0), 0.0)
-                        avg_turn_val = avg_vol_val * close  # Rp per bar 15m
+                        avg_turn_val = avg_vol_val * close
                         atr_pct_val = 0.0
                         try:
                             atr_v = _sff(r.get("ATR", 0), 0.0)
@@ -1815,12 +1784,10 @@ with tab_scanner:
                     lwick=_sf(r.get("LWick",0))
                     vb=turnover/1e9; val_str=f"{vb:.1f}B" if vb>=1 else f"{round(vb*1000,0):.0f}M"
 
-                    # ── IDX QUANT 151 STRATEGIES — daily analysis ──────────
                     iq = iq_analyze(df_d)
                     mg, mg_col, ms = calc_mesin_grade(
                         sc, sig+"|"+sig_v2, iq["iq_score"], iq["iq_verdict"], iq["iq_bagger"])
 
-                    # ── PHYSICS: EWMA σ (vol clustering) + √impact (Bouchaud) ──
                     sigma_d = ewma_sigma_daily(df_d)
                     adv_rp = adv20_rp(df_d, fallback=turnover)
                     impact_pct, part_pct = sqrt_impact(float(pos_size_jt)*1e6, adv_rp, sigma_d)
@@ -1859,7 +1826,6 @@ with tab_scanner:
                         "Mesin_Score":round(ms,1),
                     })
 
-                    # ── Fix #6+#10: LOG SINYAL — batch, outcome menyusul via Journal ──
                     try:
                         _roc3_15=_sff(r.get("ROC3",0))*100
                         _sig_batch.append({
@@ -1899,14 +1865,14 @@ with tab_scanner:
                     f"⚠️ Scan selesai tapi 0 sinyal lolos dari {n_data} saham yang di-fetch."
                 )
                 st.error(
-                    f"**🔧 Breakdown skip reasons:**\n"
-                    f"- Data terlalu pendek (<30 bars): **{skip_reasons['short']}**\n"
-                    f"- Harga invalid (Close ≤ 0): **{skip_reasons['price0']}**\n"
-                    f"- Liquidity gate (turnover/nonzero/ATR%): **{skip_reasons['liq_turn']}/{skip_reasons['liq_nonzero']}/{skip_reasons['liq_atr']}**\n"
-                    f"- Turnover/RVOL di bawah threshold: **{skip_reasons['turnover']}**\n"
-                    f"- Score di bawah min_score: **{skip_reasons['score']}**\n"
-                    f"- Exception (crash): **{skip_reasons['error']}**\n\n"
-                    f"**Last error:** `{last_err[0] or 'none'}`\n\n"
+                    f"**🔧 Breakdown skip reasons:**\\n"
+                    f"- Data terlalu pendek (<30 bars): **{skip_reasons['short']}**\\n"
+                    f"- Harga invalid (Close ≤ 0): **{skip_reasons['price0']}**\\n"
+                    f"- Liquidity gate (turnover/nonzero/ATR%): **{skip_reasons['liq_turn']}/{skip_reasons['liq_nonzero']}/{skip_reasons['liq_atr']}**\\n"
+                    f"- Turnover/RVOL di bawah threshold: **{skip_reasons['turnover']}**\\n"
+                    f"- Score di bawah min_score: **{skip_reasons['score']}**\\n"
+                    f"- Exception (crash): **{skip_reasons['error']}**\\n\\n"
+                    f"**Last error:** `{last_err[0] or 'none'}`\\n\\n"
                     f"**Saran:** turunkan Min Score → 0, Min Turnover → 0, Min RVOL → 0 di settings."
                 )
             else:
@@ -2067,7 +2033,7 @@ with tab_scanner:
             cls="bagger" if ib else("up" if roc>0 else("down" if roc<0 else "flat"))
             sym="[BAG]" if "BAGGER" in mg2 else("[PRESISI]" if "PRESISI" in mg2 else("[BANDAR]" if "BANDAR" in mg2 else("[KUAT]" if "KUAT" in mg2 else("UP" if roc>0 else "DN"))))
             th+=f'<span class="tape-item {cls}">{row["Ticker"]} {int(row["Price"])} {sym} IQ:{row.get("IQ_Verdict","?")}</span>'
-        th+=th.replace('tape-inner">',''); th+='</div></div>'
+        th+=th.replace('tape-inner">','');th+='</div></div>'
         st.markdown(th, unsafe_allow_html=True)
 
         n_mp = len(presisi_list)+len(bandar_m_list)
@@ -2227,7 +2193,7 @@ with tab_watchlist:
     st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:12px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #ff7b00;">Analisa mendalam per saham. Input ticker IDX (tanpa .JK).</div>',unsafe_allow_html=True)
     wc1,wc2,wc3=st.columns([3,1,1])
     with wc1:
-        wl_input=st.text_area("Ticker",placeholder="Contoh:\nBBCA\nARCI, ASSA, GOTO",height=120,label_visibility="collapsed",key="wl_input")
+        wl_input=st.text_area("Ticker",placeholder="Contoh:\\nBBCA\\nARCI, ASSA, GOTO",height=120,label_visibility="collapsed",key="wl_input")
     with wc2:
         wl_mode=st.radio("Mode",["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"],key="wl_mode")
         st.caption(f"Regime suggest: {rcfg['mode']}")
@@ -2237,7 +2203,7 @@ with tab_watchlist:
         wl_run=st.button("🔍 Analisa",use_container_width=True,key="wl_run")
         wl_tele=st.button("📡 Kirim Telegram",use_container_width=True,key="wl_tele")
     if wl_run and wl_input.strip():
-        raw_wl=list(dict.fromkeys([t.strip().upper() for ln in wl_input.split("\n") for t in ln.split(",") if t.strip()]))
+        raw_wl=list(dict.fromkeys([t.strip().upper() for ln in wl_input.split("\\n") for t in ln.split(",") if t.strip()]))
         if raw_wl:
             wl_res=[]; _pb_wl=st.progress(0)
             for i,t in enumerate(raw_wl):
@@ -2525,9 +2491,9 @@ with tab_trail:
                     {tr_t} · Entry {tr_e:,} → Now {int(cur):,} · {tr_q} lot ({lv:,} lembar) · Cost RT ~{_cost_tr:.2f}% · {"✅ Profit terkunci!" if ip else "⚠️ Stop masih di bawah entry"}
                   </div></div>""",unsafe_allow_html=True)
                 if tr_al and TOKEN and CHAT_ID:
-                    mt=(f"🎯 *TRAILING STOP*\n{tr_t} · {tr_m}\n"
-                        f"Entry: `{tr_e:,}` → Now: `{int(cur):,}`\n"
-                        f"Stop: `{int(stop):,}` · Float: `{pf:+.1f}%`\n"
+                    mt=(f"🎯 *TRAILING STOP*\\n{tr_t} · {tr_m}\\n"
+                        f"Entry: `{tr_e:,}` → Now: `{int(cur):,}`\\n"
+                        f"Stop: `{int(stop):,}` · Float: `{pf:+.1f}%`\\n"
                         f"Locked: `{pl:+.1f}%` (Rp {lr:,.0f})")
                     try: requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",data={"chat_id":CHAT_ID,"text":mt,"parse_mode":"Markdown"},timeout=8)
                     except: pass
@@ -2557,7 +2523,7 @@ with tab_backtest:
                     if len(d)<60: continue
                     d=apply_intraday_indicators(d)
                     ii=50
-                    while ii < len(d)-bt_fwd:   # ── Fix #3: while + skip = non-overlapping ──
+                    while ii < len(d)-bt_fwd:
                         r0=d.iloc[ii]; r1=d.iloc[ii-1]; r2=d.iloc[ii-2]
                         if bt_mode=="Scalping ⚡":   sc,_,_=score_scalping(r0,r1,r2)
                         elif bt_mode=="Momentum 🚀": sc,_,_=score_momentum(r0,r1,r2)
@@ -2574,14 +2540,14 @@ with tab_backtest:
                             hit_sl=float(bar["Low"])<=sl2
                             hit_tp=float(bar["High"])>=tp2
                             if hit_sl and hit_tp: n_ambig[0]+=1
-                            if hit_sl:            # ── Fix #1: SL diperiksa DULUAN (konservatif) ──
+                            if hit_sl:
                                 ex=sl2; exit_bar=fi; break
                             if hit_tp:
                                 ex=tp2; exit_bar=fi; break
                         gross=(ex-en)/en*100
-                        net=gross - trade_cost_pct(en, bt_comm)   # ── Fix #2: net of cost ──
+                        net=gross - trade_cost_pct(en, bt_comm)
                         bt_r.append(net); bt_holds.append(exit_bar)
-                        ii += exit_bar + 1        # ── Fix #3: lompat melewati trade selesai ──
+                        ii += exit_bar + 1
                 except: continue
             bpb.empty()
             if not bt_r: st.warning("Tidak ada trades. Turunkan Min Score.")
@@ -2591,7 +2557,6 @@ with tab_backtest:
                 pf=arr[arr>0].sum()/max(abs(arr[arr<0].sum()),0.01)
                 mxdd=arr[arr<0].min() if len(arr[arr<0])>0 else 0
                 avg_hold=np.mean(bt_holds) if bt_holds else 0
-                # Statistical significance kasar: SE of mean
                 se=np.std(arr)/max(np.sqrt(len(arr)),1); tstat=avg/max(se,1e-9)
                 sig_lbl="✅ signifikan" if abs(tstat)>2 and len(arr)>=30 else "⚠️ belum signifikan (butuh lebih banyak trade)"
                 st.markdown(f"""<div class="bt-result">
@@ -2634,11 +2599,8 @@ with tab_sizing:
             adv=adv20_rp(df_sz)
             modal_rp=float(sz_modal)*1e6; risk_rp=modal_rp*float(sz_risk)/100.0
             stop_pct=float(sz_slm)*sig_d
-            # ── Cap 1: RISK — rugi max kalau SL kena ──
             size_risk=risk_rp/max(stop_pct/100.0,1e-6)
-            # ── Cap 2: IMPACT — partisipasi ≤2% ADV (square-root law) ──
             size_impact=0.02*adv if adv>0 else size_risk
-            # ── Cap 3: KELLY — half-Kelly dari outcome T+3 Journal (kalau ada) ──
             size_kelly=None; kelly_note="Journal belum punya ≥10 outcome — Kelly cap belum aktif."
             try:
                 _jd=load_signal_log(); _done=_jd.dropna(subset=["t3_ret"])
@@ -2685,21 +2647,94 @@ with tab_sizing:
               </div>
             </div>""",unsafe_allow_html=True)
 
-# ════ TAB JOURNAL — Fix #6: falsifiability engine ════
+# ════════════════════════════════════════════════════
+#  AUTO TRACKING PATCH — outcome auto-update + per-ticker/period clarity
+# ════════════════════════════════════════════════════
+_LAST_UPD_FILE = CACHE_DIR / "last_outcome_autoupdate.pkl"
+AUTO_UPDATE_INTERVAL_SEC = 6 * 3600  # cek tiap 6 jam — cukup buat isi T+1..T+5 harian
+
+def _get_last_autoupdate():
+    try:
+        if _LAST_UPD_FILE.exists():
+            return pickle.loads(_LAST_UPD_FILE.read_bytes())["ts"]
+    except: pass
+    return 0
+
+def _set_last_autoupdate(ts):
+    try: _LAST_UPD_FILE.write_bytes(pickle.dumps({"ts": ts}))
+    except: pass
+
+def maybe_auto_update_outcomes():
+    """Dipanggil tiap render/heartbeat. Cuma benar-benar jalan kalau interval
+    sudah lewat, jadi aman dipanggil sesering apapun (rate-limited)."""
+    now_ts = time.time()
+    if now_ts - _get_last_autoupdate() >= AUTO_UPDATE_INTERVAL_SEC:
+        try:
+            n_upd, msg = update_signal_outcomes(max_tickers=60)
+            _set_last_autoupdate(now_ts)
+            return n_upd, msg
+        except Exception as e:
+            _set_last_autoupdate(now_ts)
+            return 0, f"Auto-update error: {e}"
+    return None, None
+
+def ticker_expectancy_table(done, min_n=2):
+    """Per-ticker: saham SPESIFIK mana yang beneran konsisten naik/turun
+    tiap kali disinyal — bukan cuma agregat grade."""
+    g = done.groupby("ticker").agg(
+        N=("t3_ret", "count"),
+        WinPct_T3=("t3_ret", lambda s: round(float((s > 0).mean()) * 100, 1)),
+        Avg_T1=("t1_ret", "mean"),
+        Avg_T3=("t3_ret", "mean"),
+        Avg_T5=("t5_ret", "mean"),
+        LastGrade=("mesin_grade", lambda s: s.iloc[-1]),
+        LastDate=("date", "max"),
+    ).reset_index()
+    g = g[g["N"] >= min_n]
+    for c in ["Avg_T1", "Avg_T3", "Avg_T5"]:
+        g[c] = g[c].astype(float).round(2)
+    return g.sort_values("Avg_T3", ascending=False)
+
+def period_rollup(done, freq="W"):
+    """Trend mingguan/bulanan — apakah edge sistem stabil seiring N bertambah,
+    atau cuma noise satu periode doang."""
+    d = done.copy()
+    d["_dt"] = pd.to_datetime(d["date"])
+    d["period"] = d["_dt"].dt.to_period(freq).astype(str)
+    g = d.groupby("period").agg(
+        N=("t3_ret", "count"),
+        WinPct=("t3_ret", lambda s: round(float((s > 0).mean()) * 100, 1)),
+        AvgT3=("t3_ret", "mean"),
+    ).reset_index()
+    g["AvgT3"] = g["AvgT3"].astype(float).round(2)
+    return g
+
+# ════ TAB JOURNAL — Fix #6: falsifiability engine + auto-tracking patch ════
 with tab_journal:
     st.markdown('<div class="section-title">📓 Signal Journal — Expectancy per Setup, dari DATA</div>',unsafe_allow_html=True)
-    st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #00ff88;">Tiap sinyal Scanner otomatis di-log (dedupe per ticker/hari/mode). Klik <b style="color:#00ff88">Update Outcomes</b> tiap hari → mesin join harga T+1/T+3/T+5 <b>net of cost</b>. Dalam 3-4 minggu lu punya jawaban: grade mana yang beneran punya edge, dan holding period optimal berapa. Mesin yang nabung data, bukan memori lu.</div>',unsafe_allow_html=True)
+    st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #00ff88;">Tiap sinyal Scanner otomatis di-log (dedupe per ticker/hari/mode). Outcome T+1/T+3/T+5 sekarang auto-update sendiri (lihat catatan di bawah) — tapi tombol manual tetap tersedia kalau mau paksa update sekarang.</div>',unsafe_allow_html=True)
+
+    _n_auto, _msg_auto = maybe_auto_update_outcomes()
+    if _n_auto:
+        st.toast(f"📓 Auto-update outcome: {_msg_auto}", icon="📓")
+
     jdf = load_signal_log()
     jc1,jc2,jc3=st.columns(3)
     with jc3:
-        if st.button("🔄 Update Outcomes (T+1/3/5)",use_container_width=True,key="btn_upd_out",type="primary"):
+        if st.button("🔄 Update Outcomes (T+1/3/5) — paksa sekarang",use_container_width=True,key="btn_upd_out",type="primary"):
             with st.spinner("Fetching daily closes utk join outcome..."):
                 n_upd,msg = update_signal_outcomes()
+                _set_last_autoupdate(time.time())
             if n_upd>0: st.success(msg)
             else: st.info(msg)
             jdf = load_signal_log()
     with jc1: st.metric("Total Sinyal Ter-log", len(jdf))
     with jc2: st.metric("Punya Outcome T+3", int(jdf["t3_ret"].notna().sum()) if not jdf.empty else 0)
+
+    _last_auto_ts = _get_last_autoupdate()
+    if _last_auto_ts:
+        _lat = datetime.fromtimestamp(_last_auto_ts, jakarta_tz).strftime("%H:%M:%S %d/%m")
+        st.caption(f"🔄 Auto-update outcome terakhir: {_lat} WIB · interval cek: tiap {AUTO_UPDATE_INTERVAL_SEC//3600} jam (aktif selama app kebuka)")
 
     _be = siglog_backend()
     if "GSheets" in _be:
@@ -2720,7 +2755,7 @@ GSHEET_SIGNAL_LOG_ID = "spreadsheet_id_lu"
 type = "service_account"
 project_id = "..."
 private_key_id = "..."
-private_key = \"\"\"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n\"\"\"
+private_key = \\"\\"\\"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n\\"\\"\\"
 client_email = "...@....iam.gserviceaccount.com"
 client_id = "..."
 token_uri = "https://oauth2.googleapis.com/token"
@@ -2766,6 +2801,29 @@ token_uri = "https://oauth2.googleapis.com/token"
             else:
                 st.caption("🎲 Kelly per grade butuh ≥10 outcome per grade — biarkan mesin nabung dulu.")
 
+            # ── PATCH: Per-Ticker Track Record ──
+            st.markdown('<div class="section-title">🎯 Per-Ticker Track Record — saham mana yang BENERAN konsisten naik/turun</div>',unsafe_allow_html=True)
+            tick_tbl = ticker_expectancy_table(done, min_n=2)
+            if not tick_tbl.empty:
+                st.dataframe(tick_tbl, use_container_width=True, hide_index=True)
+                winners = tick_tbl[(tick_tbl["N"]>=3)&(tick_tbl["WinPct_T3"]>=60)]
+                losers  = tick_tbl[(tick_tbl["N"]>=3)&(tick_tbl["WinPct_T3"]<=35)]
+                if not winners.empty:
+                    st.success(f"✅ Konsisten naik (N≥3, Win≥60%): {', '.join(winners['ticker'].tolist())}")
+                if not losers.empty:
+                    st.error(f"❌ Konsisten jelek (N≥3, Win≤35%): {', '.join(losers['ticker'].tolist())}")
+                st.caption("N<3 belum cukup buat nyimpulin pola per-ticker — masih bisa kebetulan.")
+            else:
+                st.caption("Belum ada ticker yang muncul ≥2x dengan outcome T+3 — biarkan mesin nabung data dulu.")
+
+            # ── PATCH: Trend Mingguan/Bulanan ──
+            st.markdown('<div class="section-title">📅 Trend Mingguan / Bulanan — apakah edge-nya stabil seiring waktu?</div>',unsafe_allow_html=True)
+            roll_freq = st.radio("Periode", ["Mingguan","Bulanan"], horizontal=True, key="roll_freq")
+            freq_code = "W" if roll_freq=="Mingguan" else "ME"
+            roll_tbl = period_rollup(done, freq_code)
+            st.dataframe(roll_tbl, use_container_width=True, hide_index=True)
+            st.caption("Kalau AvgT3 flip-flop antar periode → edge belum stabil, jangan size besar dulu. Kalau konsisten positif across periode → mulai bisa dipercaya.")
+
             st.markdown('<div class="section-title">Expectancy per Mode Scan</div>',unsafe_allow_html=True)
             st.dataframe(_exp_table("mode"),use_container_width=True,hide_index=True)
 
@@ -2796,7 +2854,7 @@ token_uri = "https://oauth2.googleapis.com/token"
                 st.dataframe(pd.DataFrame(crit_rows),use_container_width=True,hide_index=True)
             st.caption("⚠️ N < 30 per baris = BELUM statistically meaningful — biarkan mesin nabung data dulu. Jangan kalibrasi ulang sebelum N cukup (itu overfitting ke noise).")
         else:
-            st.info("📓 Sinyal sudah ter-log tapi belum ada outcome — sinyal butuh minimal 1 hari trading utk T+1. Buka tab ini besok dan klik Update Outcomes.")
+            st.info("📓 Sinyal sudah ter-log tapi belum ada outcome — sinyal butuh minimal 1 hari trading utk T+1. Buka tab ini besok dan klik Update Outcomes, atau biarkan auto-update yang jalan sendiri.")
         with st.expander("📋 Raw Signal Log (50 terakhir)"):
             st.dataframe(jdf.tail(50),use_container_width=True,hide_index=True)
         try:
@@ -2820,13 +2878,18 @@ else:
     ti="⏱️ Auto-scan aktif — scan pertama jalan otomatis" if _FT_AUTO_ON else "⏱️ Klik Scan untuk mulai"
 
 st.markdown(f"""<div style="margin-top:28px;padding-top:14px;border-top:1px solid #1c2533;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-  <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">🔥 Mesin Presisi v2.0 RIGID · Cost-Aware · SL-First · Non-Overlap · Session VWAP · Signal Journal ✅</div>
+  <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">🔥 Mesin Presisi v2.0 RIGID · Cost-Aware · SL-First · Non-Overlap · Session VWAP · Signal Journal · Auto-Tracking ✅</div>
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">{ti}</div>
 </div>""",unsafe_allow_html=True)
 
 # Heartbeat: fragment jalan tiap 30 detik di background TANPA re-render seluruh app.
 # Begitu interval lewat → trigger full rerun → auto_trigger nyala → scan jalan.
-# Ini pengganti pola Railway `while True + sleep` versi Streamlit yang benar.
+# PATCH: heartbeat ini juga sekarang trigger auto-update outcome T+1/3/5 (rate-limited
+# ke AUTO_UPDATE_INTERVAL_SEC, jadi aman walau heartbeat jalan tiap 30 detik).
+# CATATAN: kalau app Streamlit Cloud lu idle/sleep (nggak ada yang buka), heartbeat
+# ini ikut mati. Kalau mau auto-update jalan 24/7 walau nggak ada yang buka app,
+# pasang cron eksternal gratis (cron-job.org / GitHub Actions) buat ping URL app
+# lu tiap pagi — itu cukup buat wake-up app-nya dan trigger heartbeat lagi.
 if _FT_AUTO_ON:
     try:
         @st.fragment(run_every="30s")
@@ -2835,6 +2898,9 @@ if _FT_AUTO_ON:
             _sec=int(st.session_state.get("auto_scan_sec",900))
             if _lst is None or (time.time()-_lst)>=_sec:
                 st.rerun(scope="app")
+            n_upd, msg = maybe_auto_update_outcomes()
+            if n_upd:
+                st.toast(f"📓 Auto-update outcome: {msg}", icon="📓")
         _auto_heartbeat()
     except Exception:
         # Fallback Streamlit lama (<1.37): full browser reload via JS.
