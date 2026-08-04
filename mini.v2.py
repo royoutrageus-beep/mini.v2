@@ -11,6 +11,7 @@
 #  #8 Liquidity gate dlm NILAI turnover (bukan lembar)
 #  #9 Auto-scan heartbeat (st.fragment run_every) — Railway-style
 #  #10 Google Sheets persistence utk Signal Journal (fallback CSV)
+#  #11 Regime detection dipersempit EMA10/30 + momentum gate (patch)
 #  + PHYSICS ENGINE: √impact (Bouchaud) · EWMA vol (Engle) · fat tails
 #    · momentum horizon T+1/3/5 · Kelly sizing dari expectancy realisasi
 #  requirements.txt: streamlit yfinance pandas numpy pytz requests gspread google-auth
@@ -906,6 +907,13 @@ stocks_yf=[s+".JK" for s in raw_stocks]
 stock_map={s+".JK":s for s in raw_stocks}
 
 # ════ MARKET REGIME — pakai Ticker().history() ════
+# PATCH #11: EMA20/EMA55 -> EMA10/EMA30 (terlalu lambat, regime kebaca
+# RED/SIDEWAYS padahal market udah balik naik). Ditambah momentum gate
+# (ret5) sebelum GREEN dianggap rally kuat -> dari signal_log 17 Jul-4
+# Agu ketauan Bagger nyala di 67% sinyal tapi win rate cuma ~20-29%
+# (paling jelek dari semua grade) -- indikasi GREEN kepicu terlalu
+# gampang tanpa konfirmasi momentum, jadi Bagger overtriggered di
+# kondisi yang sebenarnya belum layak rally.
 @st.cache_data(ttl=300)
 def get_market_regime():
     try:
@@ -914,26 +922,32 @@ def get_market_regime():
             return ("UNKNOWN", 0, 0, 0, "Data IHSG kurang", 0.0)
         close = df["Close"].dropna()
         if len(close) < 10: return ("UNKNOWN", 0, 0, 0, "Data close kurang", 0.0)
-        ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
-        ema55 = float(close.ewm(span=min(55, len(close)-1), adjust=False).mean().iloc[-1])
+        ema20 = float(close.ewm(span=10, adjust=False).mean().iloc[-1])       # EMA10
+        ema55 = float(close.ewm(span=min(30, len(close)-1), adjust=False).mean().iloc[-1])  # EMA30
         price = float(close.iloc[-1])
         chg   = float(((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) * 100)
+        chg3  = float((close.iloc[-1]/close.iloc[-4]-1)*100) if len(close) > 4 else chg
+        ret5  = float((close.iloc[-1]/close.iloc[-6]-1)*100) if len(close) > 6 else chg3
         band=0.012; pct_vs_e20=(price-ema20)/ema20*100
         above_e20_clear=price>ema20*(1+band); above_e20_any=price>ema20*(1-band)
-        above_e55=price>ema55; recovering=chg>0.3
+        above_e55=price>ema55; recovering=chg3>0.5
         bearish_confirm=chg<-0.3 and not above_e20_any
-        if above_e20_clear and above_e55:
-            return ("GREEN", price, ema20, ema55, f"IHSG {price:,.0f} > EMA20 & EMA55 → Bullish ✅ ({pct_vs_e20:+.1f}% vs EMA20)", chg)
+        if above_e20_clear and above_e55 and ret5 >= 2.0:
+            return ("GREEN", price, ema20, ema55, f"IHSG {price:,.0f} > EMA10 & EMA30, momentum +{ret5:.1f}%/5D → Bullish kuat ✅ ({pct_vs_e20:+.1f}% vs EMA10)", chg)
+        elif above_e20_clear and above_e55:
+            # di atas kedua EMA tapi momentum 5D masih lemah -> jangan
+            # langsung dianggap rally kuat, ini yg bikin Bagger overtrigger
+            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} di atas EMA10 & EMA30 tapi momentum lemah ({ret5:+.1f}%/5D) → belum cukup buat rally", chg)
         elif above_e20_any and above_e55:
-            return ("GREEN", price, ema20, ema55, f"IHSG {price:,.0f} dekat EMA20 & di atas EMA55 → Bullish", chg)
+            return ("GREEN", price, ema20, ema55, f"IHSG {price:,.0f} dekat EMA10 & di atas EMA30 → Bullish", chg)
         elif above_e20_any and not above_e55:
-            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} > EMA20 tapi < EMA55({ema55:,.0f}) → Sideways", chg)
+            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} > EMA10 tapi < EMA30({ema55:,.0f}) → Sideways", chg)
         elif not above_e20_any and recovering:
-            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} recovery {chg:+.2f}% → Sideways", chg)
+            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} recovery 3D {chg3:+.2f}% → Sideways", chg)
         elif bearish_confirm:
-            return ("RED", price, ema20, ema55, f"IHSG {price:,.0f} < EMA20({ema20:,.0f}) {pct_vs_e20:+.1f}% → Bearish", chg)
+            return ("RED", price, ema20, ema55, f"IHSG {price:,.0f} < EMA10({ema20:,.0f}) {pct_vs_e20:+.1f}% → Bearish", chg)
         else:
-            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} sedikit di bawah EMA20 → Sideways", chg)
+            return ("SIDEWAYS", price, ema20, ema55, f"IHSG {price:,.0f} sedikit di bawah EMA10 → Sideways", chg)
     except Exception as e:
         return ("UNKNOWN", 0, 0, 0, f"IHSG error: {str(e)[:40]}", 0.0)
 
@@ -1489,7 +1503,7 @@ st.markdown(f"""<div style="background:rgba(0,0,0,.4);border:1px solid {rcolor}4
          <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-top:3px;">{rcfg["desc"]}</div></div>
     <div style="text-align:right;font-family:Space Mono,monospace;">
       <div style="font-size:18px;font-weight:700;color:{rcolor};">{ihsg_price:,.0f} <span style="font-size:11px;color:{chg_col}">{chg_sym}{abs(ihsg_chg):.2f}%</span></div>
-      <div style="font-size:9px;color:#4a5568;">EMA20 {ema20:,.0f} · EMA55 {ema55:,.0f}</div>
+      <div style="font-size:9px;color:#4a5568;">EMA10 {ema20:,.0f} · EMA30 {ema55:,.0f}</div>
     </div>
   </div>
 </div>""", unsafe_allow_html=True)
